@@ -259,7 +259,7 @@ def quoted_path(path: Path) -> str:
     return shlex.quote(str(path))
 
 
-if __name__ == "__main__":
+def command_line_run():
     ap = ArgumentParser(
         description="""
             This script creates a compressed disk image (.dmg) from a
@@ -319,6 +319,23 @@ if __name__ == "__main__":
                 arc.run(src_dir=src_dir)
         else:
             print("no directories specified", file=arc.outf)
+        print("complete", file=arc.outf)
     except Exception as err:
         print("ERROR:", err, file=sys.stderr)
         sys.exit(1)
+
+
+def automator_run():
+    log_path = Path.home()/"Library"/"Logs"/"apfs_archive.log"
+    with open(log_path, "w") as outf:
+        cmd = ["open", "-a", "Console", str(log_path)]
+        sp.run(cmd, stdout=outf, stderr=sp.STDOUT, text=True)
+        arc = APFSArchive(outf=outf)
+        arc.config.display(outf=sys.stdout)
+        for src_dir in map(Path, sys.argv[1:]):
+            arc.run(src_dir=src_dir)
+        print("complete", file=outf)
+
+
+if __name__ == "__main__":
+    command_line_run()

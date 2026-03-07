@@ -1,4 +1,4 @@
-# apfs_archive 1.0
+# apfs_archive 1.1
 
 A utility for creating compressed .dmg files on the macOS platform that uses
 APFS cloning to further reduce archive size.
@@ -79,7 +79,27 @@ If you want to use say "UDRO" just once, you can try:
 
 (Unlike the -C option, it will not change the default format.)
 
+### APFS Archive
+
+An Automator app called "APFS Archive" compresses folders you drop on it into
+dmg files in much the same way as the apfs_archive.py script does. If you want
+to change its configuration settings, you can run:
+
+    python3 apfs_archive.py -C /path/to/my_config.json
+
+### xxhash
+
+When present, the xxhash Python package may improve scanning directories for
+duplicate files. You can install it with:
+
+    python3 -m pip install xxhash
+
 ## Revision History
+
+1.1 (2026-03-06)
+
+* Automator app added
+* added a note in this README about installing xxhash
 
 1.0 (2026-03-05)
 
@@ -87,5 +107,4 @@ If you want to use say "UDRO" just once, you can try:
 
 ## To-Do
 
-* add Automator droplet app to create dmgs
 * investigate sub-file level cloning
