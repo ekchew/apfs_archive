@@ -85,7 +85,7 @@ class DataSig:
             case) or by an xxhash algorithm (the bytes digest case).
     """
     size: int
-    hash_val: int | bytes
+    hash_val: tp.Union[int, bytes]
 
 
 @dataclass
