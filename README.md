@@ -78,7 +78,8 @@ If you want to use say "UDRO" just once, you can try:
 
     python3 apfs_archive.py -c 'dmg_format:"UDRO"' /path/to/foo_dir
 
-(Unlike the -C option, it will not change the default format.)
+(Unlike the -C option, it will not change the default format. Enter
+`python3 apfs_archive.py -h` for more details.)
 
 ### APFS Archive
 
@@ -95,13 +96,16 @@ duplicate files. You can install it with:
 
     python3 -m pip install xxhash
 
+(It is also required if you want to use the script's -e option. Enter
+`python3 apfs_archive.py -h` for more details.)
+
 ## Revision History
 
 1.2 (2026-03-07)
 
 * added clone_files config that can be set false to disable cloning phase
 * added -e option to estimate how much effect cloning phase would have
-* minor fix to make script that made it require Python 3.10 and not 3.7
+* minor fix to script that made it require Python 3.10 and not 3.7
 
 1.1 (2026-03-06)
 
