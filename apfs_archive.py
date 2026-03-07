@@ -37,11 +37,13 @@ k_config_path: tp.Final[Path] = \
 @dataclass
 class Config:
     blk_size: int = 0x100000  # default = 1 MB
+    clone_files: bool = True
     dmg_format: str = "ULMO"  # LZMA-compressed (10.15 Catalina or later)
 
     def save(self):
         json_obj = {
             "blk_size": self.blk_size,
+            "clone_files": self.clone_files,
             "dmg_format": self.dmg_format
         }
         with open(k_config_path, "w") as outf:
@@ -49,6 +51,7 @@ class Config:
 
     def display(self, outf: tp.TextIO):
         print("blk_size:", self.blk_size, file=outf)
+        print("clone_files:", self.clone_files, file=outf)
         print("dmg_format:", self.dmg_format, file=outf)
         if g_got_xxhash:
             print("xxhash will be used", file=outf)
@@ -65,6 +68,7 @@ def load_config() -> Config:
 def config_from_json(json_obj: dict[str, tp.Any], default: Config) -> Config:
     return Config(
         blk_size=json_obj.get("blk_size", default.blk_size),
+        clone_files=json_obj.get("clone_files", default.clone_files),
         dmg_format=json_obj.get("dmg_format", default.dmg_format)
     )
 
@@ -89,6 +93,12 @@ class DataSig:
 
 
 @dataclass
+class CloneSavings:
+    before: int = 0
+    after: int = 0
+
+
+@dataclass
 class APFSArchive:
     """
     If you import this module from another Python script, you can use an
@@ -101,17 +111,57 @@ class APFSArchive:
         dst_dir:
             If left unassigned, the get_dst_dir() method will return the parent
             directory of the src_dir you pass it instead.
+        estimate:
+            Estimate mode simply scans the source folder in an attempt to
+            determine how much storage could be saved just by cloning
+            duplicate files alone. No dmg is created in this case.
+
+            WARNING: xxhash is required for this option.
         outf:
             All program output should be directed here. It defaults to stdout,
             but you could send it to a log file, for example.
     """
     config: Config = field(default_factory=load_config)
     dst_dir: tp.Optional[Path] = None
+    estimate: bool = False
     outf: tp.TextIO = sys.stdout
 
     def run(self, src_dir: Path) -> Path:
         if not src_dir.is_dir():
             raise ValueError(f"{quoted_path(src_dir)} is not a directory")
+
+        if self.estimate:
+            savings = self.estimate_clone_savings(src_dir)
+            pcnt = savings.after / savings.before * 100.0
+            print(
+                "estimated total file data storage:",
+                savings.before, file=self.outf
+            )
+            print(
+                "estimated storage after eliminating duplicates:",
+                savings.after, f"({pcnt:.2f}% of original)",
+                file=self.outf
+            )
+            return src_dir
+
+        if not self.config.clone_files:
+            dmg_path = self.get_dst_dir(src_dir)/f"{src_dir.name}.dmg"
+            print(
+                "making", quoted_path(dmg_path),
+                "from", quoted_path(src_dir), file=self.outf
+            )
+            cmd = [
+                "hdiutil", "create",
+                "-srcfolder", str(src_dir),
+                "-fs", "APFS",
+                "-format", self.config.dmg_format,
+                "-volname", src_dir.name,
+                str(dmg_path)
+            ]
+            sp.run(
+                cmd, check=True, stdout=self.outf, stderr=sp.STDOUT, text=True
+            )
+            return dmg_path
 
         tmp_dmg = self.get_dst_dir(src_dir)/f"{src_dir.name}_tmp.dmg"
         print(
@@ -186,6 +236,60 @@ class APFSArchive:
         target.unlink()
         cmd = ["ditto", "--clone", str(with_file), str(target)]
         sp.run(cmd, check=True, stdout=self.outf, stderr=sp.STDOUT, text=True)
+
+    def estimate_clone_savings(self, dir_path: Path) -> CloneSavings:
+        if not g_got_xxhash:
+            print("please install: python3 -m pip xxhash", file=self.outf)
+            raise NotImplementedError(
+                "estimating clone savings requires xxhash package"
+            )
+        print(
+            "scanning", quoted_path(dir_path),
+            "for possible duplicate files", file=self.outf
+        )
+        scanned: set[DataSig] = set()
+        savings = CloneSavings()
+        for base_dir, dir_names, file_names in os.walk(dir_path):
+            for file_name in file_names:
+                file_path = Path(base_dir, file_name)
+                if not file_path.is_file() or file_path.is_symlink():
+                    continue
+                data_sig = self.scan_file_data(path=file_path)
+                if data_sig.size == 0:
+                    continue
+
+                #   The actual storage footprint of a file is harder to
+                #   determine than you might think? It should be related to the
+                #   number of blocks it occupies on disk, but a sparse file may
+                #   have unallocated blocks somewhere in the middle. It is not
+                #   clear to me whether imaging a folder preserves these holes
+                #   or not? So the storage is taken to be the higher number
+                #   between the block count and the actual file size, rounded
+                #   up to the nearest 4096 byte multiple (the size of APFS
+                #   allocation blocks). This should probably be revisited at
+                #   some point.
+                storage = max(data_sig.size, file_path.stat().st_blocks * 512)
+                storage = (storage + 4095) & ~4095
+
+                savings.before += storage
+                if data_sig in scanned:
+                    #   To be rigorous about it, we would want to check that
+                    #   this is truly a duplicate file by comparing contents
+                    #   and not just hoping the hashes are unique. This is
+                    #   done for real by _handle_tmp_dmg_scan() when dmgs are
+                    #   involved. But since this is only an estimate, we assume
+                    #   xxhash's 128-bit value is sufficient to ensure
+                    #   uniqueness.
+                    print(
+                        "file", quoted_path(file_path),
+                        "is likely a duplicate",
+                        f"(estimated {storage} bytes of storage)",
+                        file=self.outf
+                    )
+                else:
+                    scanned.add(data_sig)
+                    savings.after += storage
+        return savings
 
     def _handle_tmp_dmg(self, src_dir: Path, tmp_dmg: Path) -> Path:
         print("temporarily mounting", quoted_path(tmp_dmg), file=self.outf)
@@ -280,6 +384,18 @@ def command_line_run():
             directory."""
     )
     ap.add_argument(
+        "-e", "--estimate", action="store_true",
+        help="""
+            In estimate mode, no dmg is created. Rather, the source directory
+            is scanned to estimate how much space may be saved just from
+            cloning duplicate files alone. Note that the final compression
+            phase of the dmg would likely affect how much space is actually
+            saved. The output is mainly to check whether it is worth disabling
+            clone_files when creating the dmg. NB: This option requires the
+            xxhash package. Install with: python3 -m pip install xxhash
+            """
+    )
+    ap.add_argument(
         "-C", "--config-file", default="",
         help=f"""
             Use a json config file to set run parameters. These will also be
@@ -313,7 +429,9 @@ def command_line_run():
             json_parts.append("}")
             json_obj = json.loads("".join(json_parts))
             arc.config = config_from_json(json_obj, arc.config)
+        arc.estimate = res.estimate
         arc.config.display(outf=sys.stdout)
+        print("estimate mode:", arc.estimate)
         if res.src_dirs:
             for src_dir in map(Path, res.src_dirs):
                 arc.run(src_dir=src_dir)

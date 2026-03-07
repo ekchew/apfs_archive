@@ -1,4 +1,4 @@
-# apfs_archive 1.1
+# apfs_archive 1.1.1
 
 A utility for creating compressed .dmg files on the macOS platform that uses
 APFS cloning to further reduce archive size.
@@ -41,10 +41,11 @@ and it produces a:
 Configuration options can either be loaded from a JSON file or set individually
 on the `apfs_archive.py` command line using the `-c` switch. They include
 
-| Key        | Value                                               | Default |
-| :--------- | :-------------------------------------------------- | ------: |
-| buf_size   | maximum bytes read from a file at a time            | 1048576 |
-| dmg_format | hdiutil format code to select .dmg compression type | "ULMO"  |
+| Key         | Value                                               | Default |
+| :---------- | :-------------------------------------------------- | ------: |
+| buf_size    | maximum bytes read from a file at a time            | 1048576 |
+| clone_files | do actually scan for duplicate files and clone them | true    |
+| dmg_format  | hdiutil format code to select .dmg compression type | "ULMO"  |
 
 Note that within a JSON file, the keys would need to be enclosed in "".
 
@@ -95,6 +96,12 @@ duplicate files. You can install it with:
     python3 -m pip install xxhash
 
 ## Revision History
+
+1.2 (2026-03-07)
+
+* added clone_files config that can be set false to disable cloning phase
+* added -e option to estimate how much effect cloning phase would have
+* minor fix to make script that made it require Python 3.10 and not 3.7
 
 1.1 (2026-03-06)
 
