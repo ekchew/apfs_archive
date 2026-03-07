@@ -1,4 +1,4 @@
-# apfs_archive 1.1.1
+# apfs_archive 1.2
 
 A utility for creating compressed .dmg files on the macOS platform that uses
 APFS cloning to further reduce archive size.
