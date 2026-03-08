@@ -413,7 +413,7 @@ def command_line_run():
             """
     )
     res = ap.parse_args()
-    dst_dir = res.dst_dir or None
+    dst_dir = Path(res.dst_dir) if res.dst_dir else None
     try:
         if res.config_file:
             with open(res.config_file) as inf:
