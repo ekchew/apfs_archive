@@ -1,5 +1,6 @@
 {
 	"blk_size": 1048576,
 	"clone_files": true,
+	"delete_orig": false,
 	"dmg_format": "ULMO"
 }

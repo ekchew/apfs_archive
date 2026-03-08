@@ -7,6 +7,7 @@ import json
 import os
 import secrets
 import shlex
+import shutil
 import subprocess as sp
 import sys
 import typing as tp
@@ -38,12 +39,14 @@ k_config_path: tp.Final[Path] = \
 class Config:
     blk_size: int = 0x100000  # default = 1 MB
     clone_files: bool = True
+    delete_orig: bool = False
     dmg_format: str = "ULMO"  # LZMA-compressed (10.15 Catalina or later)
 
     def save(self):
         json_obj = {
             "blk_size": self.blk_size,
             "clone_files": self.clone_files,
+            "delete_orig": self.delete_orig,
             "dmg_format": self.dmg_format
         }
         with open(k_config_path, "w") as outf:
@@ -52,6 +55,7 @@ class Config:
     def display(self, outf: tp.TextIO):
         print("blk_size:", self.blk_size, file=outf)
         print("clone_files:", self.clone_files, file=outf)
+        print("delete_orig:", self.delete_orig, file=outf)
         print("dmg_format:", self.dmg_format, file=outf)
         if g_got_xxhash:
             print("xxhash will be used", file=outf)
@@ -69,6 +73,7 @@ def config_from_json(json_obj: dict[str, tp.Any], default: Config) -> Config:
     return Config(
         blk_size=json_obj.get("blk_size", default.blk_size),
         clone_files=json_obj.get("clone_files", default.clone_files),
+        delete_orig=json_obj.get("delete_orig", default.delete_orig),
         dmg_format=json_obj.get("dmg_format", default.dmg_format)
     )
 
@@ -188,6 +193,9 @@ class APFSArchive:
             "times to match", quoted_path(src_dir), file=self.outf
         )
         os.utime(final_dmg, ns=(src_stat.st_atime_ns, src_stat.st_mtime_ns))
+        if self.config.delete_orig:
+            print("deleting", quoted_path(src_dir), file=self.outf)
+            shutil.rmtree(str(src_dir))
         return final_dmg
 
     def get_dst_dir(self, src_dir: Path) -> Path:
