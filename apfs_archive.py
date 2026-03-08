@@ -439,8 +439,14 @@ def command_line_run():
         arc.config.display(outf=sys.stdout)
         print("estimate mode:", arc.estimate)
         if res.src_dirs:
+            err: tp.Optional[Exception] = None
             for src_dir in map(Path, res.src_dirs):
-                arc.run(src_dir=src_dir)
+                try:
+                    arc.run(src_dir=src_dir)
+                except Exception as err0:
+                    err = err or err0
+            if err:
+                raise err
         else:
             print("no directories specified", file=arc.outf)
         print("complete", file=arc.outf)
@@ -456,8 +462,14 @@ def automator_run():
         sp.run(cmd, stdout=outf, stderr=sp.STDOUT, text=True)
         arc = APFSArchive(outf=outf)
         arc.config.display(outf=sys.stdout)
+        err: tp.Optional[Exception] = None
         for src_dir in map(Path, sys.argv[1:]):
-            arc.run(src_dir=src_dir)
+            try:
+                arc.run(src_dir=src_dir)
+            except Exception as err0:
+                err = err or err0
+        if err:
+            raise err
         print("complete", file=outf)
 
 
