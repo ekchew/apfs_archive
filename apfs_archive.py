@@ -129,6 +129,7 @@ class APFSArchive:
     def run(self, src_dir: Path) -> Path:
         if not src_dir.is_dir():
             raise ValueError(f"{quoted_path(src_dir)} is not a directory")
+        src_stat = src_dir.stat()
 
         if self.estimate:
             savings = self.estimate_clone_savings(src_dir)
@@ -182,6 +183,11 @@ class APFSArchive:
         finally:
             print("deleting", quoted_path(tmp_dmg), file=self.outf)
             tmp_dmg.unlink()
+        print(
+            "setting", quoted_path(final_dmg),
+            "times to match", quoted_path(src_dir), file=self.outf
+        )
+        os.utime(final_dmg, ns=(src_stat.st_atime_ns, src_stat.st_mtime_ns))
         return final_dmg
 
     def get_dst_dir(self, src_dir: Path) -> Path:
