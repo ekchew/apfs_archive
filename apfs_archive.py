@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 from argparse import ArgumentParser
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 import json
@@ -82,7 +83,7 @@ def config_from_json(json_obj: dict[str, tp.Any], default: Config) -> Config:
 
 
 @dataclass(frozen=True)
-class DataSig:
+class FileSig:
     """
     This is the key type used by the `scanned` dictionary that hopefully
     uniquely identifies file contents.
@@ -98,9 +99,15 @@ class DataSig:
 
 
 @dataclass
-class CloneSavings:
-    before: int = 0
-    after: int = 0
+class RunOutput:
+    total_bytes: int = 0
+    cloned_bytes: int = 0
+    scanned_files: dict[FileSig, list[Path]] = field(default_factory=dict)
+
+    def clear(self):
+        self.total_bytes = 0
+        self.cloned_bytes = 0
+        self.scanned_files.clear()
 
 
 @dataclass
@@ -125,11 +132,18 @@ class APFSArchive:
         outf:
             All program output should be directed here. It defaults to stdout,
             but you could send it to a log file, for example.
+        run_output:
+            This data structure contains attributes that are updates as the
+            run() method progresses. It is a good idea to call its clear()
+            method before starting another run with the same APFSArchive
+            instance, unless you want to accumulate on top of data from the
+            previous run.
     """
     config: Config = field(default_factory=load_config)
     dst_dir: tp.Optional[Path] = None
     estimate: bool = False
     outf: tp.TextIO = sys.stdout
+    run_output: RunOutput = field(default_factory=RunOutput)
 
     def run(self, src_dir: Path) -> Path:
         if not src_dir.is_dir():
@@ -137,17 +151,7 @@ class APFSArchive:
         src_stat = src_dir.stat()
 
         if self.estimate:
-            savings = self.estimate_clone_savings(src_dir)
-            pcnt = savings.after / savings.before * 100.0
-            print(
-                "estimated total file data storage:",
-                savings.before, file=self.outf
-            )
-            print(
-                "estimated storage after eliminating duplicates:",
-                savings.after, f"({pcnt:.2f}% of original)",
-                file=self.outf
-            )
+            self._run_estimate(src_dir)
             return src_dir
 
         if not self.config.clone_files:
@@ -201,7 +205,32 @@ class APFSArchive:
     def get_dst_dir(self, src_dir: Path) -> Path:
         return self.dst_dir or src_dir.parent
 
-    def scan_file_data(self, path: Path) -> DataSig:
+    def scan_dir(
+        self, dir_path: Path,
+        handle_file_sig_match: Callable[[Path, int, list[Path]], None]
+    ):
+        print(
+            "scanning", quoted_path(dir_path), "for file duplication",
+            file=self.outf
+        )
+        for base_dir, dir_names, file_names in os.walk(dir_path):
+            for file_name in file_names:
+                file_path = Path(base_dir, file_name)
+                if not file_path.is_file() or file_path.is_symlink():
+                    continue
+                file_sig = self.scan_file_data(path=file_path)
+                if file_sig.size == 0:
+                    continue
+                self.run_output.total_bytes += file_sig.size
+                try:
+                    matching_files = self.run_output.scanned_files[file_sig]
+                    handle_file_sig_match(
+                        file_path, file_sig.size, matching_files
+                    )
+                except KeyError:
+                    self.run_output.scanned_files[file_sig] = [file_path]
+
+    def scan_file_data(self, path: Path) -> FileSig:
         """
         Reads the file data and generates a hash as it goes.
         """
@@ -217,7 +246,7 @@ class APFSArchive:
                     size += len(buf)
                     xxh.update(buf)
                     buf = inf.read(self.config.blk_size)
-                return DataSig(size=size, hash_val=xxh.digest())
+                return FileSig(size=size, hash_val=xxh.digest())
 
             #   With the built-in hash, I am not aware of any way to build it
             #   up in piecemeal fashion. So we hash each block, and then make
@@ -229,7 +258,7 @@ class APFSArchive:
                 hashes.append(hash(buf))
                 buf = inf.read(self.config.blk_size)
 
-        return DataSig(
+        return FileSig(
             size=size,
             hash_val=hashes[0] if len(hashes) == 1 else hash(tuple(hashes))
         )
@@ -251,59 +280,45 @@ class APFSArchive:
         cmd = ["ditto", "--clone", str(with_file), str(target)]
         sp.run(cmd, check=True, stdout=self.outf, stderr=sp.STDOUT, text=True)
 
-    def estimate_clone_savings(self, dir_path: Path) -> CloneSavings:
+    def print_run_report(self, dst_path: Path):
+        is_archive = dst_path.is_file()
+        ro = self.run_output
+        print("total file data bytes scanned:", ro.total_bytes, file=self.outf)
+        if self.estimate:
+            self.outf.write("estimated ")
+        print("bytes cloned:", ro.cloned_bytes, file=self.outf)
+        if is_archive:
+            arc_size = dst_path.stat().st_size
+            print(quoted_path(dst_path), "size:", arc_size, file=self.outf)
+        if ro.total_bytes:
+            pcnt = ro.cloned_bytes * 100.0 / ro.total_bytes
+            print(f"{pcnt:.2f}% cloned", file=self.outf)
+            if is_archive:
+                pcnt = arc_size * 100.0 / ro.total_bytes
+                print(
+                    f"archive file size is {pcnt:.2f}% of total file data",
+                    file=self.outf
+                )
+
+    def _run_estimate(self, src_dir: Path):
+        def cb(file_path: Path, size: int, match_paths: list[Path]):
+            match0 = match_paths[0]
+            print(
+                quoted_path(file_path), f"(size={size})",
+                "possibly matches", quoted_path(match0), file=self.outf
+            )
+            self.run_output.cloned_bytes += size
+
         if not g_got_xxhash:
-            print("please install: python3 -m pip xxhash", file=self.outf)
+            print(
+                "please install xxhash (python3 -m pip xxhash)",
+                file=self.outf
+            )
             raise NotImplementedError(
                 "estimating clone savings requires xxhash package"
             )
-        print(
-            "scanning", quoted_path(dir_path),
-            "for possible duplicate files", file=self.outf
-        )
-        scanned: set[DataSig] = set()
-        savings = CloneSavings()
-        for base_dir, dir_names, file_names in os.walk(dir_path):
-            for file_name in file_names:
-                file_path = Path(base_dir, file_name)
-                if not file_path.is_file() or file_path.is_symlink():
-                    continue
-                data_sig = self.scan_file_data(path=file_path)
-                if data_sig.size == 0:
-                    continue
 
-                #   The actual storage footprint of a file is harder to
-                #   determine than you might think? It should be related to the
-                #   number of blocks it occupies on disk, but a sparse file may
-                #   have unallocated blocks somewhere in the middle. It is not
-                #   clear to me whether imaging a folder preserves these holes
-                #   or not? So the storage is taken to be the higher number
-                #   between the block count and the actual file size, rounded
-                #   up to the nearest 4096 byte multiple (the size of APFS
-                #   allocation blocks). This should probably be revisited at
-                #   some point.
-                storage = max(data_sig.size, file_path.stat().st_blocks * 512)
-                storage = (storage + 4095) & ~4095
-
-                savings.before += storage
-                if data_sig in scanned:
-                    #   To be rigorous about it, we would want to check that
-                    #   this is truly a duplicate file by comparing contents
-                    #   and not just hoping the hashes are unique. This is
-                    #   done for real by _handle_tmp_dmg_scan() when dmgs are
-                    #   involved. But since this is only an estimate, we assume
-                    #   xxhash's 128-bit value is sufficient to ensure
-                    #   uniqueness.
-                    print(
-                        "file", quoted_path(file_path),
-                        "is likely a duplicate",
-                        f"(estimated {storage} bytes of storage)",
-                        file=self.outf
-                    )
-                else:
-                    scanned.add(data_sig)
-                    savings.after += storage
-        return savings
+        self.scan_dir(src_dir, cb)
 
     def _handle_tmp_dmg(self, src_dir: Path, tmp_dmg: Path) -> Path:
         print("temporarily mounting", quoted_path(tmp_dmg), file=self.outf)
@@ -322,7 +337,7 @@ class APFSArchive:
         if not device or not volume:
             raise ValueError("unexpected output from `hdituil attach`")
         try:
-            self._handle_tmp_dmg_scan(Path(volume))
+            self.scan_dir(Path(volume), self._clone_if_data_match)
         finally:
             print("unmounting", quoted_path(tmp_dmg), file=self.outf)
             cmd = ["hdiutil", "detach", device]
@@ -346,31 +361,22 @@ class APFSArchive:
         sp.run(cmd, check=True, stdout=sp.PIPE, stderr=self.outf, text=True)
         return final_dmg
 
-    def _handle_tmp_dmg_scan(self, volume_path):
-        print("scanning for duplicate files", file=self.outf)
-        scanned: dict[DataSig, list[Path]] = {}
-        for base_dir, dir_names, file_names in os.walk(volume_path):
-            for file_name in file_names:
-                file_path = Path(base_dir, file_name)
-                if not file_path.is_file() or file_path.is_symlink():
-                    continue
-                data_sig = self.scan_file_data(path=file_path)
-                if data_sig.size == 0:
-                    continue
-                try:
-                    matching_files = scanned[data_sig]
-                    for candidate in matching_files:
-                        if self.file_data_matches(file_path, candidate):
-                            print(
-                                "cloning", quoted_path(file_path),
-                                "from", quoted_path(candidate), file=self.outf
-                            )
-                            self.clone_file(file_path, candidate)
-                            break
-                    else:
-                        matching_files.append(file_path)
-                except KeyError:
-                    scanned[data_sig] = [file_path]
+    def _clone_if_data_match(
+        self, target: Path, size: int, candidates: list[Path]
+    ):
+        for candidate in candidates:
+            if self.file_data_matches(target, candidate):
+                print(
+                    "cloning", quoted_path(target),
+                    "from", quoted_path(candidate),
+                    f"(size={size})", file=self.outf
+                )
+                self.clone_file(target, candidate)
+                self.run_output.cloned_bytes += size
+                break
+        else:
+            print("same hash matches multiple files", file=self.outf)
+            candidates.append(target)
 
 
 def quoted_path(path: Path) -> str:
@@ -450,7 +456,8 @@ def command_line_run():
             err: tp.Optional[Exception] = None
             for src_dir in map(Path, res.src_dirs):
                 try:
-                    arc.run(src_dir=src_dir)
+                    arc.run_output.clear()
+                    arc.print_run_report(arc.run(src_dir=src_dir))
                 except Exception as err0:
                     err = err or err0
             if err:
@@ -473,7 +480,8 @@ def automator_run():
         err: tp.Optional[Exception] = None
         for src_dir in map(Path, sys.argv[1:]):
             try:
-                arc.run(src_dir=src_dir)
+                arc.run_output.clear()
+                arc.print_run_report(arc.run(src_dir=src_dir))
             except Exception as err0:
                 err = err or err0
         if err:
