@@ -600,11 +600,11 @@ def command_line_run():
             these options do not overwrite the defaults.
             """
     )
-
     ap.add_argument(
         "--version", action="store_true",
-        help="Prints a version string and exits"
+        help="Prints a version string and exits."
     )
+
     res = ap.parse_args()
 
     if res.version:
@@ -690,4 +690,7 @@ def automator_run():
 
 
 if __name__ == "__main__":
-    command_line_run()
+    if sys.argv[0].find("apfs_archive.py") >= 0:
+        command_line_run()
+    else:
+        automator_run()
