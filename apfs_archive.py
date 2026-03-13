@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 
 from argparse import ArgumentParser
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 import json
@@ -29,6 +30,9 @@ except ImportError:
     g_got_xxhash = False
 
 
+k_version: tp.Final[str] = "v1.2.2"
+
+
 # ---- Config Management ------------------------------------------------------
 
 
@@ -38,10 +42,15 @@ k_config_path: tp.Final[Path] = \
 
 @dataclass
 class Config:
+    """
+    The configuration attributes are described in the READ_ME file.
+    """
+
     blk_size: int = 0x100000  # default = 1 MB
     clone_files: bool = True
     delete_orig: bool = False
     dmg_format: str = "ULMO"  # LZMA-compressed (10.15 Catalina or later)
+    validate: bool = True
 
     def save(self):
         json_obj = {
@@ -58,11 +67,18 @@ class Config:
         print("clone_files:", self.clone_files, file=outf)
         print("delete_orig:", self.delete_orig, file=outf)
         print("dmg_format:", self.dmg_format, file=outf)
+        print("validate:", self.validate, file=outf)
         if g_got_xxhash:
             print("xxhash will be used", file=outf)
 
 
 def load_config() -> Config:
+    """
+    If a config file can be found at ~/Library/Preferences/apfs_archive.json,
+    it is loaded from there. Otherwise, this functions returns a
+    default-initialized Config.
+    """
+
     if k_config_path.is_file():
         with open(k_config_path) as inf:
             json_obj = json.load(inf)
@@ -71,11 +87,20 @@ def load_config() -> Config:
 
 
 def config_from_json(json_obj: dict[str, tp.Any], default: Config) -> Config:
+    """
+    Args:
+        json_obj: a json object in dict form
+            This is obtained by decoding a config file.
+        default: a Config instance
+            Any keys that cannot be found in json_obj are obtained from this
+            instance instead. It is usually just a default-initialized Config.
+    """
     return Config(
         blk_size=json_obj.get("blk_size", default.blk_size),
         clone_files=json_obj.get("clone_files", default.clone_files),
         delete_orig=json_obj.get("delete_orig", default.delete_orig),
-        dmg_format=json_obj.get("dmg_format", default.dmg_format)
+        dmg_format=json_obj.get("dmg_format", default.dmg_format),
+        validate=json_obj.get("validate", default.validate)
     )
 
 
@@ -100,6 +125,10 @@ class FileSig:
 
 @dataclass
 class RunOutput:
+    """
+    See run_output attribute of APFSArchive for a description of this.
+    """
+
     total_bytes: int = 0
     cloned_bytes: int = 0
     scanned_files: dict[FileSig, list[Path]] = field(default_factory=dict)
@@ -122,7 +151,7 @@ class APFSArchive:
             This is either read from the Preferences or default-initialized.
         dst_dir:
             If left unassigned, the get_dst_dir() method will return the parent
-            directory of the src_dir you pass it instead.
+            directory of the src_path you pass it instead.
         estimate:
             Estimate mode simply scans the source folder in an attempt to
             determine how much storage could be saved just by cloning
@@ -132,6 +161,10 @@ class APFSArchive:
         outf:
             All program output should be directed here. It defaults to stdout,
             but you could send it to a log file, for example.
+        version:
+            If True, this prints version info to outf when you call run().
+            (You can pass any Path into the method and it will be ignored
+            other than being used as the return value.)
         run_output:
             This data structure contains attributes that are updates as the
             run() method progresses. It is a good idea to call its clear()
@@ -143,72 +176,92 @@ class APFSArchive:
     dst_dir: tp.Optional[Path] = None
     estimate: bool = False
     outf: tp.TextIO = sys.stdout
+    version: bool = False
     run_output: RunOutput = field(default_factory=RunOutput)
 
-    def run(self, src_dir: Path) -> Path:
-        if not src_dir.is_dir():
-            raise ValueError(f"{quoted_path(src_dir)} is not a directory")
-        src_stat = src_dir.stat()
+    def run(self, src_path: Path) -> Path:
+        """
+        This method handles whatever processing needs to be done as specified
+        by APFSArchive's attributes.
+
+        Args:
+            src_path: the source directory
+
+        Returns: the destination path
+            This may be the dmg file that is created. In estimate mode, it will
+            simply be src_path.
+        """
+
+        if self.version:
+            print("apfs_archive", k_version, file=self.outf)
+            return src_path
+
+        src_path = src_path.resolve()
+        src_stat = src_path.stat()
 
         if self.estimate:
-            self._run_estimate(src_dir)
-            return src_dir
+            self._estimate(src_path)
+            return src_path
 
-        if not self.config.clone_files:
-            dmg_path = self.get_dst_dir(src_dir)/f"{src_dir.name}.dmg"
+        if self.config.clone_files:
+            dst_path = self._archive(src_path)
+        else:
+            dst_path = self._make_dmg(
+                src_path=src_path, format=self.config.dmg_format
+            )
+
+        if self.config.validate:
             print(
-                "making", quoted_path(dmg_path),
-                "from", quoted_path(src_dir), file=self.outf
+                "validating", quoted_path(dst_path),
+                file=self.outf, flush=True
             )
-            cmd = [
-                "hdiutil", "create",
-                "-srcfolder", str(src_dir),
-                "-fs", "APFS",
-                "-format", self.config.dmg_format,
-                "-volname", src_dir.name,
-                str(dmg_path)
-            ]
-            sp.run(
-                cmd, check=True, stdout=self.outf, stderr=sp.STDOUT, text=True
-            )
-            return dmg_path
-
-        tmp_dmg = self.get_dst_dir(src_dir)/f"{src_dir.name}_tmp.dmg"
-        print(
-            "making temporary", quoted_path(tmp_dmg),
-            "from", quoted_path(src_dir), file=self.outf
-        )
-        cmd = [
-            "hdiutil", "create",
-            "-srcfolder", str(src_dir),
-            "-fs", "APFS",
-            "-format", "UDRW",
-            "-volname", src_dir.name,
-            str(tmp_dmg)
-        ]
-        sp.run(cmd, check=True, stdout=self.outf, stderr=sp.STDOUT, text=True)
-        try:
-            final_dmg = self._handle_tmp_dmg(src_dir, tmp_dmg)
-        finally:
-            print("deleting", quoted_path(tmp_dmg), file=self.outf)
-            tmp_dmg.unlink()
-        print(
-            "setting", quoted_path(final_dmg),
-            "times to match", quoted_path(src_dir), file=self.outf
-        )
-        os.utime(final_dmg, ns=(src_stat.st_atime_ns, src_stat.st_mtime_ns))
+            self._sp_run("hdiutil", "verify", dst_path)
         if self.config.delete_orig:
-            print("deleting", quoted_path(src_dir), file=self.outf)
-            shutil.rmtree(str(src_dir))
-        return final_dmg
+            print(
+                "deleting", quoted_path(src_path),
+                file=self.outf, flush=True
+            )
+            shutil.rmtree(str(src_path))
+        print(
+            "setting", quoted_path(dst_path), "times to match",
+            quoted_path(src_path), file=self.outf
+        )
+        os.utime(dst_path, ns=(src_stat.st_atime_ns, src_stat.st_mtime_ns))
+        return dst_path
 
-    def get_dst_dir(self, src_dir: Path) -> Path:
-        return self.dst_dir or src_dir.parent
+    def get_dst_dir(self, src_path: Path) -> Path:
+        return self.dst_dir or src_path.parent
 
     def scan_dir(
         self, dir_path: Path,
         handle_file_sig_match: Callable[[Path, int, list[Path]], None]
     ):
+        """
+        This method scans a directory in search of file duplication by calling
+        os.walk() on it. Whenever it finds something that looks like it may be
+        a duplicate, it invokes the supplied callback function.
+
+        Args:
+            dir_path: the directory path to search
+            handle_file_sig_match: a callback functor
+                This should take 3 positional args and return none:
+                    Path: path to candidate file
+                    int: size of file data
+                    list[Path]: list of files which may contain identical data
+                        In a perfect world, the file signature alone (which
+                        contains the file size and a hash of its data) should
+                        be sufficient to uniquely identify a file. With
+                        xxhash's 128-bit digests, there is a strong chance that
+                        this would be the case. The list, then, would only ever
+                        contain one path.
+
+                        But if you are worried about hash collisions, you can
+                        call file_data_matches() on the candidate and each of
+                        the listed files. If the new file does not match any of
+                        the others, you can add it to the list. Otherwise, you
+                        can clone it from the matching file.
+        """
+
         print(
             "scanning", quoted_path(dir_path), "for file duplication",
             file=self.outf
@@ -233,6 +286,12 @@ class APFSArchive:
     def scan_file_data(self, path: Path) -> FileSig:
         """
         Reads the file data and generates a hash as it goes.
+
+        Args:
+            path: path to a file
+
+        Returns:
+            FileSig contain data size and hash value
         """
         size = 0
         with open(path, "rb") as inf:
@@ -264,6 +323,15 @@ class APFSArchive:
         )
 
     def file_data_matches(self, path1: Path, path2: Path) -> bool:
+        """
+        This method reads 2 files a blkSize at a time, and compares them to
+        check if they contain identical data. It is meant to be called after
+        a file signature comparison generates a hit, just to be sure that the
+        files truly are identical. (If the hash function is really good, it
+        may not be necessary, though in my experience, it doesn't add a huge
+        amount of overhead in most cases.)
+        """
+
         with open(path1, "rb") as inf1:
             with open(path2, "rb") as inf2:
                 buf1 = inf1.read(self.config.blk_size)
@@ -276,39 +344,85 @@ class APFSArchive:
         return buf1 == buf2
 
     def clone_file(self, target: Path, with_file: Path):
+        """
+        Deletes the target file and replaces it with a clone of the other.
+        """
+
         target.unlink()
         cmd = ["ditto", "--clone", str(with_file), str(target)]
         sp.run(cmd, check=True, stdout=self.outf, stderr=sp.STDOUT, text=True)
 
     def print_run_report(self, dst_path: Path):
-        is_archive = dst_path.is_file()
+        """
+        During a run(), some metrics are collected in run_output. This method
+        prints a report to outf.
+
+        Args:
+            dst_path: this should be whatever run() returns
+        """
+
         ro = self.run_output
+
         print("total file data bytes scanned:", ro.total_bytes, file=self.outf)
+
         if self.estimate:
             self.outf.write("estimated ")
-        print("bytes cloned:", ro.cloned_bytes, file=self.outf)
-        if is_archive:
-            arc_size = dst_path.stat().st_size
-            print(quoted_path(dst_path), "size:", arc_size, file=self.outf)
+        self.outf.write(f"bytes cloned: {ro.cloned_bytes}")
         if ro.total_bytes:
-            pcnt = ro.cloned_bytes * 100.0 / ro.total_bytes
-            print(f"{pcnt:.2f}% cloned", file=self.outf)
-            if is_archive:
-                pcnt = arc_size * 100.0 / ro.total_bytes
-                print(
-                    f"archive file size is {pcnt:.2f}% of total file data",
-                    file=self.outf
-                )
+            percentage = ro.cloned_bytes * 100.0 / ro.total_bytes
+            self.outf.write(f" ({percentage:.2f}%)")
+        print(file=self.outf)
 
-    def _run_estimate(self, src_dir: Path):
+        if dst_path.is_file():
+            arc_size = dst_path.stat().st_size
+            self.outf.write(f"archive file size: {arc_size}")
+            if ro.total_bytes:
+                percentage = arc_size * 100.0 / ro.total_bytes
+                self.outf.write(f" ({percentage:.2f}%)")
+            print(file=self.outf)
+
+    def _archive(self, src_path: Path) -> Path:
+        tmp_name = f"{src_path.name}_tmp.dmg"
+        with self._make_tmp_dmg(src_path, name=tmp_name) as tmp_dmg:
+            print(
+                "temporarily mounting", quoted_path(tmp_dmg),
+                file=self.outf, flush=True
+            )
+            res = self._sp_run("hdiutil", "attach", tmp_dmg, stdout=sp.PIPE)
+            device = ""
+            volume = ""
+            for line in res.stdout.splitlines():
+                if not device and line.strip().startswith("/dev/"):
+                    device = line.split()[0]
+                i = line.find("/Volumes")
+                if i >= 0:
+                    volume = line[i:].strip()
+            if not device or not volume:
+                raise ValueError("unexpected output from `hdituil attach`")
+
+            try:
+                self.scan_dir(Path(volume), self._clone_if_data_match)
+            finally:
+                print("unmounting", quoted_path(tmp_dmg), file=self.outf)
+                self._sp_run("hdiutil", "detach", device)
+
+            dst_name = f"{src_path.name}.dmg"
+            return self._make_dmg(
+                tmp_dmg, format=self.config.dmg_format, name=dst_name
+            )
+
+    def _estimate(self, src_dir: Path):
         def cb(file_path: Path, size: int, match_paths: list[Path]):
             match0 = match_paths[0]
             print(
                 quoted_path(file_path), f"(size={size})",
-                "possibly matches", quoted_path(match0), file=self.outf
+                "likely matches", quoted_path(match0), file=self.outf
             )
             self.run_output.cloned_bytes += size
 
+        #   Since cb doesn't go so far as to call file_data_matches(), we want
+        #   a quality hash here to prevent collisions (where 2 files with of
+        #   the same size but with different data get the same hash value).
         if not g_got_xxhash:
             print(
                 "please install xxhash (python3 -m pip xxhash)",
@@ -320,46 +434,88 @@ class APFSArchive:
 
         self.scan_dir(src_dir, cb)
 
-    def _handle_tmp_dmg(self, src_dir: Path, tmp_dmg: Path) -> Path:
-        print("temporarily mounting", quoted_path(tmp_dmg), file=self.outf)
-        cmd = ["hdiutil", "attach", str(tmp_dmg)]
-        res = sp.run(
-            cmd, check=True, stdout=sp.PIPE, stderr=self.outf, text=True
-        )
-        device = ""
-        volume = ""
-        for line in res.stdout.splitlines():
-            if not device and line.strip().startswith("/dev/"):
-                device = line.split()[0]
-            i = line.find("/Volumes")
-            if i >= 0:
-                volume = line[i:].strip()
-        if not device or not volume:
-            raise ValueError("unexpected output from `hdituil attach`")
-        try:
-            self.scan_dir(Path(volume), self._clone_if_data_match)
-        finally:
-            print("unmounting", quoted_path(tmp_dmg), file=self.outf)
-            cmd = ["hdiutil", "detach", device]
-            sp.run(
-                cmd, check=True, stdout=sp.PIPE, stderr=self.outf, text=True
-            )
+    def _ready_dmg_path(self, src_path: Path) -> Path:
+        #   Derives a destination path for the dmg file from the source path.
+        #   If older dmg already exists, it will be deleted.
+        dmg_path = self.get_dst_dir(src_path)/f"{src_path.name}.dmg"
+        if dmg_path.is_file():
+            print("deleting", quoted_path(dmg_path), file=self.outf)
+            dmg_path.unlink()
+        return dmg_path
 
-        final_dmg = self.get_dst_dir(src_dir)/f"{src_dir.name}.dmg"
-        if final_dmg.exists():
-            print("deleting old", quoted_path(final_dmg), file=self.outf)
-            final_dmg.unlink()
-        print(
-            "creating final compressed", quoted_path(final_dmg),
-            "from", tmp_dmg, file=self.outf
-        )
-        cmd = [
-            "hdiutil", "convert", str(tmp_dmg),
-            "-format", self.config.dmg_format,
-            "-o", str(final_dmg)
-        ]
-        sp.run(cmd, check=True, stdout=sp.PIPE, stderr=self.outf, text=True)
-        return final_dmg
+    def _make_dmg(
+        self, src_path: Path,
+        format: str = "UDRW",
+        name: str = "{}.dmg"
+    ) -> Path:
+        """
+        This method runs hdiutil to make a new dmg file.
+
+        Args:
+            src_path: path to a source directory or dmg file
+                In the latter case, `hdutil convert` will be run instead of
+                `hdiutil create`.
+            format: hdiutil's --format arg
+            name: name of the dmg file (without parent path)
+                If this contains "{}", that will replaced by src_path's name
+                using the str.format() function. So if your src_path were
+                /path/to/foo, the default name would be "foo.dmg".
+
+        Returns: path to the new dmg file
+
+        The function may raise an exception if anything goes wrong.
+        """
+
+        if name.find("{}") >= 0:
+            name = name.format(src_path.name)
+        dmg_path = self.get_dst_dir(src_path)/name
+        if dmg_path.is_file():
+            print("deleting old", quoted_path(dmg_path), file=self.outf)
+            dmg_path.unlink()
+        if src_path.is_dir():
+            print(
+                "creating", quoted_path(dmg_path),
+                "from directory", quoted_path(src_path),
+                file=self.outf, flush=True
+            )
+            self._sp_run(
+                "hdiutil", "create",
+                "-srcfolder", src_path,
+                "-fs", "APFS",
+                "-format", format,
+                "-volname", src_path.name,
+                dmg_path
+            )
+        else:
+            print(
+                "converting", quoted_path(dmg_path),
+                "from archive", quoted_path(src_path),
+                file=self.outf, flush=True
+            )
+            self._sp_run(
+                "hdiutil", "convert", src_path,
+                "-format", format,
+                "-o", dmg_path
+            )
+        return dmg_path
+
+    @contextmanager
+    def _make_tmp_dmg(
+        self, src_path: Path,
+        format: str = "UDRW",
+        name: str = "{}_tmp.dmg"
+    ) -> Iterator[Path]:
+        """
+        This is much like _make_dmg(), except its context manager automatically
+        deletes the temporary dmg file when you leave the with block.
+        """
+
+        dmg_path = self._make_dmg(src_path, format, name)
+        try:
+            yield dmg_path
+        finally:
+            print("deleting", quoted_path(dmg_path), file=self.outf)
+            dmg_path.unlink()
 
     def _clone_if_data_match(
         self, target: Path, size: int, candidates: list[Path]
@@ -378,12 +534,24 @@ class APFSArchive:
             print("same hash matches multiple files", file=self.outf)
             candidates.append(target)
 
+    def _sp_run(self, *args, **kwargs) -> sp.CompletedProcess:
+        kwargs.setdefault("check", True)
+        kwargs.setdefault("stdout", self.outf)
+        kwargs.setdefault("stderr", sp.STDOUT)
+        kwargs.setdefault("text", True)
+        return sp.run([str(a) for a in args], **kwargs)
+
 
 def quoted_path(path: Path) -> str:
     return shlex.quote(str(path))
 
 
 def command_line_run():
+    """
+    This function should run when apfs_archive.py is run directly. In the
+    Automator case, there is a separate automator_run() function.
+    """
+
     ap = ArgumentParser(
         description="""
             This script creates a compressed disk image (.dmg) from a
@@ -432,38 +600,70 @@ def command_line_run():
             these options do not overwrite the defaults.
             """
     )
+
+    ap.add_argument(
+        "--version", action="store_true",
+        help="Prints a version string and exits"
+    )
     res = ap.parse_args()
+
+    if res.version:
+        APFSArchive(version=True).run(Path())
+        return
+
     dst_dir = Path(res.dst_dir) if res.dst_dir else None
     try:
+
+        #   With the -C (--config-file) option, we first load the config into
+        #   memory and then save it back to:
+        #       ~/Library/Preferences/apfs_archive.json
         if res.config_file:
             with open(res.config_file) as inf:
                 json_obj = json.load(inf)
             config_from_json(json_obj, Config()).save()
+
+        #   APFSArchive's initializer should then try to load any config in
+        #   Library/Preferences.
         arc = APFSArchive(dst_dir=dst_dir)
+
+        #   Next, override the defaults with anything specified through
+        #   -c (--config) options.
         if res.config:
+
+            #   Let json_parts be parts of a string of JSON we are trying to
+            #   build up from the -c strings.
             json_parts: list[str] = ["{"]
             for cfg in res.config:
                 k, v = cfg.split(":", maxsplit=1)
+
+                #   The -c format does not require the key to be enclosed by ""
+                #   but JSON does. So we strip any "" if they are already there
+                #   and then tack them back on.
                 json_parts.append(f'''"{k.strip().strip('"')}"''')
+
                 json_parts.append(f": {v}")
             json_parts.append("}")
+
             json_obj = json.loads("".join(json_parts))
             arc.config = config_from_json(json_obj, arc.config)
+
         arc.estimate = res.estimate
         arc.config.display(outf=sys.stdout)
         print("estimate mode:", arc.estimate)
+
         if res.src_dirs:
             err: tp.Optional[Exception] = None
             for src_dir in map(Path, res.src_dirs):
                 try:
                     arc.run_output.clear()
-                    arc.print_run_report(arc.run(src_dir=src_dir))
+                    arc.print_run_report(arc.run(src_path=src_dir))
                 except Exception as err0:
                     err = err or err0
             if err:
                 raise err
         else:
             print("no directories specified", file=arc.outf)
+
         print("complete", file=arc.outf)
     except Exception as err:
         print("ERROR:", err, file=sys.stderr)
@@ -476,12 +676,12 @@ def automator_run():
         cmd = ["open", "-a", "Console", str(log_path)]
         sp.run(cmd, stdout=outf, stderr=sp.STDOUT, text=True)
         arc = APFSArchive(outf=outf)
-        arc.config.display(outf=sys.stdout)
+        arc.config.display(outf=outf)
         err: tp.Optional[Exception] = None
         for src_dir in map(Path, sys.argv[1:]):
             try:
                 arc.run_output.clear()
-                arc.print_run_report(arc.run(src_dir=src_dir))
+                arc.print_run_report(arc.run(src_path=src_dir))
             except Exception as err0:
                 err = err or err0
         if err:
