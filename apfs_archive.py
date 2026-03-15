@@ -277,8 +277,8 @@ class APFSArchive:
             )
         return FindUnusedDstRes(path, used_paths)
 
-    def scan_dir(
-        self, dir_path: Path,
+    def scan_path(
+        self, path: Path,
         handle_file_sig_match: Callable[[Path, int, list[Path]], None]
     ):
         """
@@ -287,7 +287,11 @@ class APFSArchive:
         a duplicate, it invokes the supplied callback function.
 
         Args:
-            dir_path: the directory path to search
+            path: path to a file or directory
+                In the directory case, its contents will be recursed by
+                os.walk() in search of files to examine. Note that within a
+                source directory, symlinks are ignored (be it to files or
+                subdirectories).
             handle_file_sig_match: a callback functor
                 This should take 3 positional args and return none:
                     Path: path to candidate file
@@ -307,26 +311,36 @@ class APFSArchive:
                         can clone it from the matching file.
         """
 
+        def check_file(file_path: Path):
+            file_sig = self.scan_file_data(path=file_path)
+            if file_sig.size == 0:
+                return
+            self.run_output.total_bytes += file_sig.size
+            try:
+                matching_files = self.run_output.scanned_files[
+                    file_sig
+                ]
+            except KeyError:
+                self.run_output.scanned_files[file_sig] = [file_path]
+            else:
+                handle_file_sig_match(
+                    file_path, file_sig.size, matching_files
+                )
+
+        path = path.resolve()
         print(
-            "scanning", quoted_path(dir_path), "for file duplication",
+            "scanning", quoted_path(path), "for file duplication",
             file=self.outf
         )
-        for base_dir, dir_names, file_names in os.walk(dir_path):
-            for file_name in file_names:
-                file_path = Path(base_dir, file_name)
-                if not file_path.is_file() or file_path.is_symlink():
-                    continue
-                file_sig = self.scan_file_data(path=file_path)
-                if file_sig.size == 0:
-                    continue
-                self.run_output.total_bytes += file_sig.size
-                try:
-                    matching_files = self.run_output.scanned_files[file_sig]
-                    handle_file_sig_match(
-                        file_path, file_sig.size, matching_files
-                    )
-                except KeyError:
-                    self.run_output.scanned_files[file_sig] = [file_path]
+        if path.is_dir():
+            for base_dir, dir_names, file_names in os.walk(path):
+                for file_name in file_names:
+                    file_path = Path(base_dir, file_name)
+                    if not file_path.is_file() or file_path.is_symlink():
+                        continue
+                    check_file(file_path)
+        elif path.is_file():
+            check_file(path)
 
     def scan_file_data(self, path: Path) -> FileSig:
         """
@@ -418,9 +432,9 @@ class APFSArchive:
             self.outf.write(f" ({percentage:.2f}%)")
         print(file=self.outf)
 
-        if dst_path.is_file():
+        if dst_path.is_file() and not (self.estimate or self.clone_in_place):
             arc_size = dst_path.stat().st_size
-            self.outf.write(f"archive file size: {arc_size}")
+            self.outf.write(f"{quoted_path(dst_path)} file size: {arc_size}")
             if ro.total_bytes:
                 percentage = arc_size * 100.0 / ro.total_bytes
                 self.outf.write(f" ({percentage:.2f}%)")
@@ -446,7 +460,7 @@ class APFSArchive:
                 raise ValueError("unexpected output from `hdituil attach`")
 
             try:
-                self.scan_dir(Path(volume), self._clone_if_data_match)
+                self.scan_path(Path(volume), self._clone_if_data_match)
             finally:
                 print("unmounting", quoted_path(tmp_dmg), file=self.outf)
                 self._sp_run("hdiutil", "detach", device)
@@ -462,7 +476,7 @@ class APFSArchive:
             "to reduce any detected file duplication through cloning",
             file=self.outf
         )
-        self.scan_dir(src_path, self._clone_if_data_match)
+        self.scan_path(src_path, self._clone_if_data_match)
 
     def _estimate(self, src_dir: Path):
         def cb(file_path: Path, size: int, match_paths: list[Path]):
@@ -490,7 +504,7 @@ class APFSArchive:
             "to estimate how much data cloning might potentially save",
             file=self.outf
         )
-        self.scan_dir(src_dir, cb)
+        self.scan_path(src_dir, cb)
 
     def _ready_dmg_path(self, src_path: Path) -> Path:
         #   Derives a destination path for the dmg file from the source path.
@@ -628,6 +642,7 @@ def command_line_run():
             files, the path would typically be the directory to archive. It
             could also be another dmg file. In that case, it will be remade
             after a cloning pass (assuming clone_files is selected in config).
+            Note that the path(s) should not be symlinks.
             """
     )
     ap.add_argument(
