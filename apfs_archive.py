@@ -169,8 +169,17 @@ class APFSArchive:
             Estimate mode simply scans the source folder in an attempt to
             determine how much storage could be saved just by cloning
             duplicate files alone. No dmg is created in this case.
-
             WARNING: xxhash is required for this option.
+        clone_in_place:
+            This is like estimate, except it actually goes ahead and replaces
+            duplication through cloning, but without creating any dmg archives.
+        expand:
+            In this case, the src_path you pass to run() should be a dmg file,
+            and run() will expand its contents out into a folder. If the
+            clone_files config is selected, it will alse run a clone-in-place
+            on the expanded folder. In fact, if the destination folder is
+            something like foo_2 because foo was already in use, it will clone
+            both together in hopes of finding a lot of overlap.
         outf:
             All program output should be directed here. It defaults to stdout,
             but you could send it to a log file, for example.
@@ -189,6 +198,7 @@ class APFSArchive:
     dst_dir: tp.Optional[Path] = None
     estimate: bool = False
     clone_in_place: bool = False
+    expand: bool = False
     outf: tp.TextIO = sys.stdout
     version: bool = False
     run_output: RunOutput = field(default_factory=RunOutput)
@@ -221,30 +231,37 @@ class APFSArchive:
             self._clone_in_place(src_path)
             return src_path
 
-        if self.config.clone_files:
+        if self.expand:
+            dst_path = self._expand(src_path)
+        elif self.config.clone_files:
             dst_path = self._archive(src_path)
         else:
             dst_path = self._make_dmg(
                 src_path=src_path, format=self.config.dmg_format
             )
 
-        if self.config.validate:
+        if self.config.validate and dst_path.is_file():
             print(
                 "validating", quoted_path(dst_path),
                 file=self.outf, flush=True
             )
             self._sp_run("hdiutil", "verify", dst_path)
-        if self.config.delete_orig:
-            print(
-                "deleting", quoted_path(src_path),
-                file=self.outf, flush=True
-            )
-            shutil.rmtree(str(src_path))
+
         print(
             "setting", quoted_path(dst_path), "times to match",
             quoted_path(src_path), file=self.outf
         )
         os.utime(dst_path, ns=(src_stat.st_atime_ns, src_stat.st_mtime_ns))
+
+        if self.config.delete_orig:
+            print(
+                "deleting", quoted_path(src_path),
+                file=self.outf, flush=True
+            )
+            if src_path.is_dir():
+                shutil.rmtree(str(src_path))
+            else:
+                src_path.unlink()
         return dst_path
 
     def get_dst_dir(self, src_path: Path) -> Path:
@@ -442,27 +459,8 @@ class APFSArchive:
 
     def _archive(self, src_path: Path) -> Path:
         with self._make_tmp_dmg(src_path) as tmp_dmg:
-            print(
-                "temporarily mounting", quoted_path(tmp_dmg),
-                file=self.outf, flush=True
-            )
-            res = self._sp_run("hdiutil", "attach", tmp_dmg, stdout=sp.PIPE)
-            device = ""
-            volume = ""
-            for line in res.stdout.splitlines():
-                if not device and line.strip().startswith("/dev/"):
-                    device = line.split()[0]
-                i = line.find("/Volumes")
-                if i >= 0:
-                    volume = line[i:].strip()
-            if not device or not volume:
-                raise ValueError("unexpected output from `hdituil attach`")
-
-            try:
-                self.scan_path(Path(volume), self._clone_if_data_match)
-            finally:
-                print("unmounting", quoted_path(tmp_dmg), file=self.outf)
-                self._sp_run("hdiutil", "detach", device)
+            with self._mount_dmg(tmp_dmg) as mount_path:
+                self.scan_path(Path(mount_path), self._clone_if_data_match)
 
             name = f"{src_path.name}.dmg" if src_path.is_dir() \
                 else src_path.name
@@ -472,11 +470,6 @@ class APFSArchive:
             )
 
     def _clone_in_place(self, src_path: Path):
-        print(
-            "scanning", quoted_path(src_path),
-            "to reduce any detected file duplication through cloning",
-            file=self.outf
-        )
         self.scan_path(src_path, self._clone_if_data_match)
 
     def _estimate(self, src_dir: Path):
@@ -506,6 +499,27 @@ class APFSArchive:
             file=self.outf
         )
         self.scan_path(src_dir, cb)
+
+    def _expand(self, src_path: Path) -> Path:
+        with self._mount_dmg(src_path) as mount_path:
+            dst = self.find_unused_dst(
+                self.get_dst_dir(src_path), mount_path.name
+            )
+            print(
+                "copying", quoted_path(mount_path),
+                "to", quoted_path(dst.path), file=self.outf
+            )
+            self._sp_run("ditto", "-v", mount_path, dst.path)
+        if self.config.clone_files:
+            #   In the event that the destination path we bumped by a
+            #   pre-existing directory, run a clone-in-place on the most recent
+            #   such directory before doing it again on our new destination.
+            #   That way, any shared files between the 2 directories should get
+            #   cloned.
+            if dst.used_paths:
+                self._clone_in_place(dst.used_paths[-1])
+            self._clone_in_place(dst.path)
+        return dst.path
 
     def _ready_dmg_path(self, src_path: Path) -> Path:
         #   Derives a destination path for the dmg file from the source path.
@@ -593,6 +607,38 @@ class APFSArchive:
             print("deleting", quoted_path(dmg_path), file=self.outf)
             dmg_path.unlink()
 
+    @contextmanager
+    def _mount_dmg(
+        self, dmg_path: Path
+    ) -> Iterator[Path]:
+        """
+        A context manager for mounting a dmg. It yields the mounted path
+        (something like /Volumes/foo). Then it automatically unmounts it as
+        you leave the with block.
+        """
+
+        print(
+            "temporarily mounting", quoted_path(dmg_path),
+            file=self.outf, flush=True
+        )
+        res = self._sp_run("hdiutil", "attach", dmg_path, stdout=sp.PIPE)
+        device = ""
+        volume = ""
+        for line in res.stdout.splitlines():
+            if not device and line.strip().startswith("/dev/"):
+                device = line.split()[0]
+            i = line.find("/Volumes")
+            if i >= 0:
+                volume = line[i:].strip()
+        if not device or not volume:
+            raise ValueError("unexpected output from `hdituil attach`")
+
+        try:
+            yield Path(volume)
+        finally:
+            print("unmounting", quoted_path(dmg_path), file=self.outf)
+            self._sp_run("hdiutil", "detach", device)
+
     def _clone_if_data_match(
         self, target: Path, size: int, candidates: list[Path]
     ):
@@ -655,7 +701,8 @@ def command_line_run():
     ap.add_argument(
         "-d", "--dst-dir", default="",
         help="""
-            Destination directory, where relevant. If needed but not supplied, the destination directory will be the parent directory of each
+            Destination directory, where relevant. If needed but not supplied,
+            the destination directory will be the parent directory of each
             SRC_PATH."""
     )
     ap.add_argument(
@@ -697,6 +744,19 @@ def command_line_run():
             that this option will perform the cloning even if the clone_files
             config is set false. It would have nothing to do otherwise.)
             """
+    )
+    ap.add_argument(
+        "-x", "--expand", action="store_true",
+        help="""
+            With this option, the SRC_PATH should be a dmg file. Its contents
+            get expanded out to a regular directory. If the clone_files config
+            is selected (it is by default), it will also run a clone-in-place
+            on the expanded directory. In the case where the destination is
+            something like foo_2 because foo was already taken, the cloning
+            will apply to both directories together. The idea is that it is
+            likely there will be significant overlap between the two
+            directories.
+           """
     )
     ap.add_argument(
         "--version", action="store_true",
@@ -748,8 +808,14 @@ def command_line_run():
         arc.estimate = res.estimate
         arc.clone_in_place = res.clone_in_place
         arc.config.display(outf=sys.stdout)
+        arc.expand = res.expand
         print("estimate mode:", arc.estimate)
         print("clone_in_place mode:", not arc.estimate and arc.clone_in_place)
+        print(
+            "expand mode:",
+            not (arc.estimate or arc.clone_in_place) and
+            arc.expand
+        )
         collect_output = arc.estimate or arc.clone_in_place
 
         if res.src_paths:
