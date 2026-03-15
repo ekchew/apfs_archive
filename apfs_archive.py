@@ -188,6 +188,7 @@ class APFSArchive:
     config: Config = field(default_factory=load_config)
     dst_dir: tp.Optional[Path] = None
     estimate: bool = False
+    clone_in_place: bool = False
     outf: tp.TextIO = sys.stdout
     version: bool = False
     run_output: RunOutput = field(default_factory=RunOutput)
@@ -214,6 +215,10 @@ class APFSArchive:
 
         if self.estimate:
             self._estimate(src_path)
+            return src_path
+
+        if self.clone_in_place:
+            self._clone_in_place(src_path)
             return src_path
 
         if self.config.clone_files:
@@ -451,6 +456,14 @@ class APFSArchive:
                 tmp_dmg, format=self.config.dmg_format, name=dst_name
             )
 
+    def _clone_in_place(self, src_path: Path):
+        print(
+            "scanning", quoted_path(src_path),
+            "to reduce any detected file duplication through cloning",
+            file=self.outf
+        )
+        self.scan_dir(src_path, self._clone_if_data_match)
+
     def _estimate(self, src_dir: Path):
         def cb(file_path: Path, size: int, match_paths: list[Path]):
             match0 = match_paths[0]
@@ -472,6 +485,11 @@ class APFSArchive:
                 "estimating clone savings requires xxhash package"
             )
 
+        print(
+            "scanning", quoted_path(src_dir),
+            "to estimate how much data cloning might potentially save",
+            file=self.outf
+        )
         self.scan_dir(src_dir, cb)
 
     def _ready_dmg_path(self, src_path: Path) -> Path:
@@ -604,25 +622,26 @@ def command_line_run():
             """
     )
     ap.add_argument(
-        "src_dirs", metavar="SRC_DIR", nargs="*",
-        help="One or more directory paths to archive."
+        "src_paths", metavar="SRC_PATH", nargs="*",
+        help="""
+            Source path(s) to process. In the default mode of creating dmg
+            files, the path would typically be the directory to archive. It
+            could also be another dmg file. In that case, it will be remade
+            after a cloning pass (assuming clone_files is selected in config).
+            """
     )
     ap.add_argument(
         "-d", "--dst-dir", default="",
         help="""
-            Destination directory for .dmg file.
-            If not supplied, they will go in the parent of each source
-            directory."""
+            Destination directory, where relevant. If needed but not supplied, the destination directory will be the parent directory of each
+            SRC_PATH."""
     )
     ap.add_argument(
         "-e", "--estimate", action="store_true",
         help="""
             In estimate mode, no dmg is created. Rather, the source directory
             is scanned to estimate how much space may be saved just from
-            cloning duplicate files alone. Note that the final compression
-            phase of the dmg would likely affect how much space is actually
-            saved. The output is mainly to check whether it is worth disabling
-            clone_files when creating the dmg. NB: This option requires the
+            cloning duplicate files alone.  NB: This option requires the
             xxhash package. Install with: python3 -m pip install xxhash
             """
     )
@@ -641,6 +660,20 @@ def command_line_run():
             you know your data are already compressed). You may specify more
             than one -c option to override multiple parameters. Unlike -C,
             these options do not overwrite the defaults.
+            """
+    )
+    ap.add_argument(
+        "-p", "--clone-in-place", action="store_true",
+        help="""
+            Rather than archiving each SRC_PATH as a dmg, this option looks for
+            file duplication and attempts to clone files in-place. Clearly, the
+            volume needs to be formatted AFPS for this to have any useful
+            effect. If more than one SRC_PATH is supplied, cloning candidates
+            will be searched both within and between them. The latter can be
+            useful in situation where you suspect a "foo" and "foo copy"
+            directory to contain similar--if not identical--contents. (Note
+            that this option will perform the cloning even if the clone_files
+            config is set false. It would have nothing to do otherwise.)
             """
     )
     ap.add_argument(
@@ -691,19 +724,27 @@ def command_line_run():
             arc.config = config_from_json(json_obj, arc.config)
 
         arc.estimate = res.estimate
+        arc.clone_in_place = res.clone_in_place
         arc.config.display(outf=sys.stdout)
         print("estimate mode:", arc.estimate)
+        print("clone_in_place mode:", not arc.estimate and arc.clone_in_place)
+        collect_output = arc.estimate or arc.clone_in_place
 
-        if res.src_dirs:
+        if res.src_paths:
             err: tp.Optional[Exception] = None
-            for src_dir in map(Path, res.src_dirs):
+            for src_path in map(Path, res.src_paths):
                 try:
-                    arc.run_output.clear()
-                    arc.print_run_report(arc.run(src_path=src_dir))
+                    if not collect_output:
+                        arc.run_output.clear()
+                    dst_path = arc.run(src_path=src_path)
+                    if not collect_output:
+                        arc.print_run_report(dst_path)
                 except Exception as err0:
                     err = err or err0
             if err:
                 raise err
+            if collect_output:
+                arc.print_run_report(dst_path)
         else:
             print("no directories specified", file=arc.outf)
 
@@ -721,10 +762,10 @@ def automator_run():
         arc = APFSArchive(outf=outf)
         arc.config.display(outf=outf)
         err: tp.Optional[Exception] = None
-        for src_dir in map(Path, sys.argv[1:]):
+        for src_path in map(Path, sys.argv[1:]):
             try:
                 arc.run_output.clear()
-                arc.print_run_report(arc.run(src_path=src_dir))
+                arc.print_run_report(arc.run(src_path=src_path))
             except Exception as err0:
                 err = err or err0
         if err:
