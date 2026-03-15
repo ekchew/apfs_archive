@@ -104,7 +104,7 @@ def config_from_json(json_obj: dict[str, tp.Any], default: Config) -> Config:
     )
 
 
-# -----------------------------------------------------------------------------
+# ---- Other APFSArchive Support Classes --------------------------------------
 
 
 @dataclass(frozen=True)
@@ -137,6 +137,19 @@ class RunOutput:
         self.total_bytes = 0
         self.cloned_bytes = 0
         self.scanned_files.clear()
+
+
+@dataclass
+class FindUnusedDstRes:
+    """
+    Return type of the APFSArchive.find_unused_dst() method.
+    """
+
+    path: Path
+    used_paths: list[Path]
+
+
+# ---- APFSArchive ------------------------------------------------------------
 
 
 @dataclass
@@ -231,6 +244,33 @@ class APFSArchive:
 
     def get_dst_dir(self, src_path: Path) -> Path:
         return self.dst_dir or src_path.parent
+
+    def find_unused_dst(
+        self, parent_dir: Path, name: str
+    ) -> FindUnusedDstRes:
+        """
+        Ideally, the destination path would simply be parent_dir/name. But if
+        something already exists at that location, this method adds a "_2"
+        suffix to the name (before the file extension), followed by a "_3" and
+        so on until it finds an unsused path. This path is returned in the
+        .path field of a FindUnusedDstRes The .used_paths list is populated by
+        all the rejected paths.
+        """
+        path0 = parent_dir/name
+        path = path0
+        used_paths: list[Path] = []
+        index = 2
+        while path.exists():
+            used_paths.append(path)
+            path = path0.parent/f"{path0.stem}_{index}{path0.suffix}"
+            index += 1
+        if used_paths:
+            print(quoted_path(path0), "is already in use", file=self.outf)
+            print(
+                "changing destination to", quoted_path(path), "instead",
+                file=self.outf
+            )
+        return FindUnusedDstRes(path, used_paths)
 
     def scan_dir(
         self, dir_path: Path,
@@ -468,10 +508,7 @@ class APFSArchive:
 
         if name.find("{}") >= 0:
             name = name.format(src_path.name)
-        dmg_path = self.get_dst_dir(src_path)/name
-        if dmg_path.is_file():
-            print("deleting old", quoted_path(dmg_path), file=self.outf)
-            dmg_path.unlink()
+        dmg_path = self.find_unused_dst(self.get_dst_dir(src_path), name).path
         if src_path.is_dir():
             print(
                 "creating", quoted_path(dmg_path),
@@ -542,8 +579,14 @@ class APFSArchive:
         return sp.run([str(a) for a in args], **kwargs)
 
 
+# ---- Stand Alone Utility Functions ------------------------------------------
+
+
 def quoted_path(path: Path) -> str:
     return shlex.quote(str(path))
+
+
+# ---- Self-Executing Entry Points --------------------------------------------
 
 
 def command_line_run():
@@ -693,4 +736,5 @@ if __name__ == "__main__":
     if sys.argv[0].find("apfs_archive.py") >= 0:
         command_line_run()
     else:
+        # FWIW sys.argv[0] in the Automator case appears to be "-c".
         automator_run()
