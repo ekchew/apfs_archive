@@ -46,6 +46,7 @@ class Config:
     The configuration attributes are described in the READ_ME file.
     """
 
+    auto_expand: bool = True
     blk_size: int = 0x100000  # default = 1 MB
     clone_files: bool = True
     delete_orig: bool = False
@@ -54,15 +55,18 @@ class Config:
 
     def save(self):
         json_obj = {
+            "auto_expand": self.auto_expand,
             "blk_size": self.blk_size,
             "clone_files": self.clone_files,
             "delete_orig": self.delete_orig,
-            "dmg_format": self.dmg_format
+            "dmg_format": self.dmg_format,
+            "validate": self.validate
         }
         with open(k_config_path, "w") as outf:
             json.dump(json_obj, outf, indent="\t")
 
     def display(self, outf: tp.TextIO):
+        print("auto_expand:", self.auto_expand, file=outf)
         print("blk_size:", self.blk_size, file=outf)
         print("clone_files:", self.clone_files, file=outf)
         print("delete_orig:", self.delete_orig, file=outf)
@@ -96,6 +100,7 @@ def config_from_json(json_obj: dict[str, tp.Any], default: Config) -> Config:
             instance instead. It is usually just a default-initialized Config.
     """
     return Config(
+        auto_expand=json_obj.get("auto_expand", default.auto_expand),
         blk_size=json_obj.get("blk_size", default.blk_size),
         clone_files=json_obj.get("clone_files", default.clone_files),
         delete_orig=json_obj.get("delete_orig", default.delete_orig),
@@ -853,6 +858,8 @@ def automator_run():
         for src_path in map(Path, sys.argv[1:]):
             try:
                 arc.run_output.clear()
+                if arc.config.auto_expand:
+                    arc.expand = not src_path.is_dir()
                 arc.print_run_report(arc.run(src_path=src_path))
             except Exception as err0:
                 err = err or err0
