@@ -441,8 +441,7 @@ class APFSArchive:
             print(file=self.outf)
 
     def _archive(self, src_path: Path) -> Path:
-        tmp_name = f"{src_path.name}_tmp.dmg"
-        with self._make_tmp_dmg(src_path, name=tmp_name) as tmp_dmg:
+        with self._make_tmp_dmg(src_path) as tmp_dmg:
             print(
                 "temporarily mounting", quoted_path(tmp_dmg),
                 file=self.outf, flush=True
@@ -465,9 +464,11 @@ class APFSArchive:
                 print("unmounting", quoted_path(tmp_dmg), file=self.outf)
                 self._sp_run("hdiutil", "detach", device)
 
-            dst_name = f"{src_path.name}.dmg"
+            name = f"{src_path.name}.dmg" if src_path.is_dir() \
+                else src_path.name
             return self._make_dmg(
-                tmp_dmg, format=self.config.dmg_format, name=dst_name
+                tmp_dmg, format=self.config.dmg_format,
+                name=name
             )
 
     def _clone_in_place(self, src_path: Path):
@@ -538,8 +539,14 @@ class APFSArchive:
         The function may raise an exception if anything goes wrong.
         """
 
+        print(f"{name=}")
         if name.find("{}") >= 0:
-            name = name.format(src_path.name)
+            name = name.format(
+                src_path.name if src_path.is_dir() else src_path.stem
+            )
+            print(f"{src_path=}")
+            print(f"{src_path.stem=}")
+            print(f"{name=}")
         dmg_path = self.find_unused_dst(self.get_dst_dir(src_path), name).path
         if src_path.is_dir():
             print(
