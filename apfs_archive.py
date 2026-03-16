@@ -5,14 +5,17 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
+import io
 import json
 import os
+import re
 import secrets
 import shlex
 import shutil
 import subprocess as sp
 import sys
 import typing as tp
+import traceback
 
 #   Python's build-in hash() function is used to tag file data for comparison
 #   purposes unless the xxhash package is available. In that case, a 128-bit
@@ -30,7 +33,43 @@ except ImportError:
     g_got_xxhash = False
 
 
-k_version: tp.Final[str] = "v1.3"
+# ---- Constants --------------------------------------------------------------
+
+
+k_version: tp.Final[str] = "v1.3.1"
+
+
+#   The following are used in parsing -c / --config args.
+
+k_config_key_prefix_rx: tp.Final[tp.Pattern] = re.compile(r"no_?")
+
+k_config_key_aliases: tp.Final[dict[str, str]] = {
+    "clone": "clone_files",
+    "size": "buf_size",
+    "del": "delete_orig",
+    "delete": "delete_orig",
+    "fmt": "dmg_format",
+    "format": "dmg_format",
+    "val": "validate"
+}
+
+k_format_aliases: tp.Final[dict[str, str]] = {
+    "RO": "UDRO",
+    "READ_ONLY": "UDRO",
+    "UNCMP": "UDRO",
+    "GZ": "UDZO",
+    "GZIP": "UDZO",
+    "ZIP": "UDZO",
+    "MAXCOMPAT": "UDZO",
+    "FAST": "ULFO",
+    "FASTCMP": "ULFO",
+    "LZFSE": "ULFO",
+    "7Z": "ULMO",
+    "7ZIP": "ULMO",
+    "XZ": "ULMO",
+    "LZMA": "ULMO",
+    "MAXCMP": "ULMO"
+}
 
 
 # ---- Config Management ------------------------------------------------------
@@ -681,6 +720,53 @@ def command_line_run():
     Automator case, there is a separate automator_run() function.
     """
 
+    def parse_c_opts(parse_res: tp.Any) -> dict[str, tp.Any]:
+        #   This function is designed to parse the -c / --config args on the
+        #   command line (if any).
+        #
+        #   Args:
+        #       parse_res: return value of argparse.parse_args()
+        #
+        #   Returns:
+        #       json object in dict form
+        #
+        #   Raises:
+        #       ValueError if parsing opts string fails
+
+        first = True
+        try:
+            iof = io.StringIO()
+            iof.write("{")
+            if parse_res.config:
+                for arg in parse_res.config:
+                    if first:
+                        first = False
+                    else:
+                        iof.write(", ")
+                    tup = arg.split(":", 1)
+                    key = tup[0].strip().strip('"')
+                    if len(tup) == 1:
+                        match = k_config_key_prefix_rx.match(key)
+                        if match:
+                            key = key[match.end():]
+                            val = "false"
+                        else:
+                            val = "true"
+                    else:
+                        val = tup[1].strip()
+                    key = k_config_key_aliases.get(key, key)
+                    if key == "dmg_format":
+                        val = val.strip('"').upper()
+                        val = k_format_aliases.get(val, val)
+                        val = f'"{val}"'
+                    iof.write(f'"{key}": {val}')
+            iof.write("}")
+            iof.seek(0)
+            print(iof.getvalue())
+            return json.load(iof)
+        except Exception as ex:
+            raise ValueError(f"could not parse -c/--config arg ({ex})")
+
     ap = ArgumentParser(
         description="""
             This script creates a compressed disk image (.dmg) from a
@@ -726,10 +812,10 @@ def command_line_run():
         "-c", "--config", action="append",
         help="""
             This option allows you to override a single configuration parameter
-            such as -c 'dmg_format:"UDRO"' (to create an uncompressed dmg when
-            you know your data are already compressed). You may specify more
-            than one -c option to override multiple parameters. Unlike -C,
-            these options do not overwrite the defaults.
+            such as -c fmt:zip (to create an zip-compressed dmg). You may
+            specify more than one -c option to override multiple parameters.
+            Unlike -C, these options do not overwrite the defaults. See the
+            READ_ME file for more info on configuration parameters.
             """
     )
     ap.add_argument(
@@ -787,24 +873,7 @@ def command_line_run():
 
         #   Next, override the defaults with anything specified through
         #   -c (--config) options.
-        if res.config:
-
-            #   Let json_parts be parts of a string of JSON we are trying to
-            #   build up from the -c strings.
-            json_parts: list[str] = ["{"]
-            for cfg in res.config:
-                k, v = cfg.split(":", maxsplit=1)
-
-                #   The -c format does not require the key to be enclosed by ""
-                #   but JSON does. So we strip any "" if they are already there
-                #   and then tack them back on.
-                json_parts.append(f'''"{k.strip().strip('"')}"''')
-
-                json_parts.append(f": {v}")
-            json_parts.append("}")
-
-            json_obj = json.loads("".join(json_parts))
-            arc.config = config_from_json(json_obj, arc.config)
+        arc.config = config_from_json(parse_c_opts(res), arc.config)
 
         arc.estimate = res.estimate
         arc.clone_in_place = res.clone_in_place
@@ -840,6 +909,8 @@ def command_line_run():
         print("complete", file=arc.outf)
     except Exception as err:
         print("ERROR:", err, file=sys.stderr)
+        if k_version.find("dev") >= 0:
+            traceback.print_exc()
         sys.exit(1)
 
 
