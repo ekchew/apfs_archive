@@ -1,4 +1,4 @@
-# apfs_archive 1.2.2
+# apfs_archive 1.3
 
 A utility for creating compressed .dmg files on the macOS platform that uses
 APFS cloning to further reduce archive size.
@@ -43,6 +43,7 @@ on the `apfs_archive.py` command line using the `-c` switch. They include
 
 | Key         | Value                                               | Default |
 | :---------- | :-------------------------------------------------- | ------: |
+| auto_expand | Automator expands files and archives directories    | true    |
 | buf_size    | maximum bytes read from a file at a time            | 1048576 |
 | clone_files | do actually scan for duplicate files and clone them | true    |
 | delete_orig | delete original after successfully processing       | false   |
@@ -50,6 +51,9 @@ on the `apfs_archive.py` command line using the `-c` switch. They include
 | validate    | run hdiutil verify on new dmgs                      | true    |
 
 Note that within a JSON file, the keys would need to be enclosed in "".
+
+If auto_expand is set false, Automator will remake the dmgs instead to try to
+clone the files within them (assuming clone_files is true).
 
 The validate option is not strictly necessary, but may provide some peace of
 mind when using it in conjunction with delete_orig, as the the deletion will
@@ -160,6 +164,21 @@ Note: Starting with v1.2.2, new development will be done in separate git
 branches that are periodically merged into the main one. That is when this
 READ_ME will be updated and a new version number assigned. I aspire to make
 these numbered releases stable builds.
+
+1.3 (2026-03-15)
+
+* source path can now be a dmg file
+  * in that case, it is remade after files inside have been cloned
+* creates a foo_2.dmg if foo.dmg already exists
+  * the script used to simply overwrite foo.dmg
+* added -p (--clone-in-place) option to clone files without making dmgs
+* added -x (--expand) option to expand dmg back into folder
+  * runs clone-in-place on folder (unless disabled)
+  * if expanding to foo_2, foo and foo_2 will get clone-in-place together
+* auto_expand config defaults true
+  * only relevant to Automator runs
+  * archive folders to dmg, expand dmg files
+  * if set false, dmg files are remade instead
 
 1.2.2 (2026-03-13)
 

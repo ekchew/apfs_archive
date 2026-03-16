@@ -30,7 +30,7 @@ except ImportError:
     g_got_xxhash = False
 
 
-k_version: tp.Final[str] = "v1.2.2"
+k_version: tp.Final[str] = "v1.3"
 
 
 # ---- Config Management ------------------------------------------------------
@@ -866,6 +866,7 @@ def automator_run():
         if err:
             raise err
         print("complete", file=outf)
+    sp.run(['osascript', '-e', 'tell application "Finder" to activate\nbeep'])
 
 
 if __name__ == "__main__":
