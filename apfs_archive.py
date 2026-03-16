@@ -558,14 +558,10 @@ class APFSArchive:
         The function may raise an exception if anything goes wrong.
         """
 
-        print(f"{name=}")
         if name.find("{}") >= 0:
             name = name.format(
                 src_path.name if src_path.is_dir() else src_path.stem
             )
-            print(f"{src_path=}")
-            print(f"{src_path.stem=}")
-            print(f"{name=}")
         dmg_path = self.find_unused_dst(self.get_dst_dir(src_path), name).path
         if src_path.is_dir():
             print(
