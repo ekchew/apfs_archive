@@ -1,4 +1,4 @@
-# apfs_archive 1.3
+# apfs_archive 1.3.1
 
 A utility for creating compressed .dmg files on the macOS platform that uses
 APFS cloning to further reduce archive size.
@@ -76,6 +76,7 @@ application, you would most likely want to use one of these:
   * photos, music, videos, and even pdfs may fall into this category
 * "UDZO" zlib compression applied
   * this is similar to what you would get with a .zip file
+  * it has also been supported since the earliest versions of Mac OS X
 * "ULFO" lzfse compression applied
   * essentially Apple's version of .zip
   * it reputedly has similar compression levels but runs faster
@@ -84,12 +85,55 @@ application, you would most likely want to use one of these:
   * this is the tightest compression available
   * requires macOS 10.15 (Catalina) or later
 
-If you want to use say "UDRO" just once, you can try:
+#### -c / --config Arg Short-Hand
 
-    python3 apfs_archive.py -c 'dmg_format:"UDRO"' /path/to/foo_dir
+What you have seen seen above describes the rigid format needed in a JSON
+config file. The example.json file shows what this would look like with all the
+keys assigned default values.
 
-(Unlike the -C option, it will not change the default format. Enter
-`python3 apfs_archive.py -h` for more details.)
+With the `-c` option on the command line, you can shorten some of this syntax
+for the sake of convenience. Take the following examples:
+
+    -c '"dmg_format": "UDZO"'
+    -c '"delete_orig": true'
+    -c '"clone_files": false'
+
+They show exactly how things need to appear in a config file. But on the
+command line, you could shorten them to:
+
+    -c fmt:zip
+    -c del
+    -c noclone
+
+respectively.
+
+To begin with, you need not supply the double-quotes around the keys. For
+`dmg_format`, the value may also omit the double-quotes and be given in lower
+case.
+
+Aliases for config keys include:
+
+| Key         | Aliases     |
+| :---------- | :---------- |
+| buf_size    | size        |
+| clone_files | clone       |
+| delete_orig | del, delete |
+| dmg_format  | fmt, format |
+| validate    | val         |
+
+For boolean key values, you can even omit the `:true/false` part. By default,
+it will be considered true, but if you prefix the key with `no` or `no_`, it
+will be set false instead.
+
+For the `dmg_format` key, there are also a number of aliases on the value side,
+since it can be rather difficult to remember a code like `UDZO`.
+
+| dmg_format Value | Aliases                    |
+| :--------------- | :------------------------- |
+| UDRO             | ro, read_only, uncmp       |
+| UDZO             | gz, gzip, zip, maxcompat   |
+| ULFO             | fast, fastcmp, lzfse       |
+| ULMO             | 7z, 7zip, xz, lzma, maxcmp |
 
 ### Automator Support
 
@@ -164,6 +208,11 @@ Note: Starting with v1.2.2, new development will be done in separate git
 branches that are periodically merged into the main one. That is when this
 READ_ME will be updated and a new version number assigned. I aspire to make
 these numbered releases stable builds.
+
+1.3.1 (2026-03-16)
+
+* fixed a bug that prevented multiple `-c` args on the command line
+  * made a better parser for such args (see above)
 
 1.3 (2026-03-15)
 
