@@ -5,6 +5,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
+from zipfile import ZipFile
 import io
 import json
 import os
@@ -14,8 +15,9 @@ import shlex
 import shutil
 import subprocess as sp
 import sys
-import typing as tp
+import tarfile
 import traceback
+import typing as tp
 
 #   Python's build-in hash() function is used to tag file data for comparison
 #   purposes unless the xxhash package is available. In that case, a 128-bit
@@ -70,6 +72,15 @@ k_format_aliases: tp.Final[dict[str, str]] = {
     "LZMA": "ULMO",
     "MAXCMP": "ULMO"
 }
+
+
+#   Regular expression for identifying supported archive types for the
+#   -x / --expand option.
+
+k_expand_rx: tp.Final[tp.Pattern] = re.compile(
+    r"\.(dmg|sparse(bundle|image)|tar|t(ar\.)?([gx]z|bz2?|zst)|z(ip|st))$",
+    re.IGNORECASE
+)
 
 
 # ---- Config Management ------------------------------------------------------
@@ -276,7 +287,7 @@ class APFSArchive:
             return src_path
 
         if self.expand:
-            dst_path = self._expand_dmg(src_path)
+            dst_path = self._expand(src_path)
         elif self.config.clone_files:
             dst_path = self._archive(src_path)
         else:
@@ -544,27 +555,19 @@ class APFSArchive:
         )
         self.scan_path(src_dir, cb)
 
-    def _expand_dmg(self, src_path: Path) -> Path:
-        outer_name = src_path.stem
+    def _expand(self, src_path: Path) -> Path:
+        match = k_expand_rx.search(src_path.name)
+        if not match:
+            raise ValueError(f"cannot expand {quoted_path(src_path)}")
         outer_dst = self.find_unused_dst(
-            self.get_dst_dir(src_path), outer_name
+            self.get_dst_dir(src_path), src_path.name[: match.start()]
         )
-        with self._mount_dmg(src_path) as mount_path:
-            inner_name = mount_path.name
-            if inner_name != outer_name:
-                print(
-                    "making directory:", quoted_path(outer_dst.path),
-                    file=self.outf
-                )
-                outer_dst.path.mkdir(parents=True)
-                inner_dst = outer_dst.path/inner_name
-            else:
-                inner_dst = outer_dst.path
-            print(
-                "copying", quoted_path(mount_path),
-                "to", quoted_path(inner_dst), file=self.outf
-            )
-            self._sp_run("ditto", "-v", mount_path, inner_dst)
+        if match.group() in (".dmg", ".sparsebundle", ".sparseimage"):
+            self._expand_dmg(src_path, outer_dst)
+        elif match.group() == ".zip":
+            self._expand_zip(src_path, outer_dst)
+        else:
+            self._expand_tar(src_path, outer_dst)
         if self.config.clone_files:
             #   In the event that the destination path we bumped by a
             #   pre-existing directory, run a clone-in-place on the most recent
@@ -575,6 +578,116 @@ class APFSArchive:
                 self._clone_in_place(outer_dst.used_paths[-1])
             self._clone_in_place(outer_dst.path)
         return outer_dst.path
+
+    def _expand_dmg(self, src_path: Path, outer_dst: FindUnusedDstRes):
+        with self._mount_dmg(src_path) as mount_path:
+            inner_name = mount_path.name
+            if inner_name != outer_dst.path.name:
+                print(
+                    "making directory:", quoted_path(outer_dst.path),
+                    file=self.outf
+                )
+                outer_dst.path.mkdir(parents=True)
+                inner_dir = outer_dst.path/inner_name
+            else:
+                inner_dir = outer_dst.path
+            print(
+                "copying", quoted_path(mount_path),
+                "to", quoted_path(inner_dir), file=self.outf
+            )
+            self._sp_run("ditto", "-V", mount_path, inner_dir)
+
+    def _expand_tar(self, src_path: Path, outer_dst: FindUnusedDstRes):
+        print("scanning", src_path, file=self.outf)
+        has_root_dir = True
+        root_name = ""
+        has_metadata = False
+        with tarfile.open(src_path) as tf:
+            for name in tf.getnames():
+                path = Path(name)
+                if path.name.startswith("._"):
+                    has_metadata = True
+                    continue
+                root = path.parts[0]
+                if not root_name:
+                    root_name = root
+                elif root != root_name:
+                    has_root_dir = False
+            if has_metadata:
+                print(
+                    "Mac-specific file system metadata found",
+                    file=self.outf
+                )
+            if has_root_dir and root_name == outer_dst.path.name:
+                tar_dir = outer_dst.path.parent
+            else:
+                print(
+                    "making directory:", quoted_path(outer_dst.path),
+                    file=self.outf
+                )
+                outer_dst.path.mkdir(parents=True)
+                tar_dir = outer_dst.path
+            if has_root_dir:
+                print(
+                    "expanding", quoted_path(src_path), "to",
+                    quoted_path(tar_dir/root_name), file=self.outf
+                )
+            else:
+                print(
+                    "expanding", quoted_path(src_path), "contents into",
+                    quoted_path(tar_dir), file=self.outf
+                )
+            if not has_metadata:
+                tf.extractall(path=str(tar_dir))
+                return
+        self._sp_run("tar", "-xvf", src_path, "-C", tar_dir)
+
+    def _expand_zip(self, src_path: Path, outer_dst: FindUnusedDstRes):
+        print("scanning", src_path, file=self.outf)
+        has_root_dir = True
+        root_name = ""
+        has_metadata = False
+        with ZipFile(src_path) as zf:
+            for name in zf.namelist():
+                path = Path(name)
+                if path.name.startswith("._"):
+                    has_metadata = True
+                    continue
+                root = path.parts[0]
+                if root == "__MACOSX":
+                    has_metadata = True
+                elif not root_name:
+                    root_name = root
+                elif root != root_name:
+                    has_root_dir = False
+            if has_metadata:
+                print(
+                    "Mac-specific file system metadata found",
+                    file=self.outf
+                )
+            if has_root_dir and root_name == outer_dst.path.name:
+                unzip_dir = outer_dst.path.parent
+            else:
+                print(
+                    "making directory:", quoted_path(outer_dst.path),
+                    file=self.outf
+                )
+                outer_dst.path.mkdir(parents=True)
+                unzip_dir = outer_dst.path
+            if has_root_dir:
+                print(
+                    "unzipping", quoted_path(src_path), "to",
+                    quoted_path(unzip_dir/root_name), file=self.outf
+                )
+            else:
+                print(
+                    "unzipping", quoted_path(src_path), "contents into",
+                    quoted_path(unzip_dir), file=self.outf
+                )
+            if not has_metadata:
+                zf.extractall(path=str(unzip_dir))
+                return
+        self._sp_run("ditto", "-xkV", src_path, unzip_dir)
 
     def _ready_dmg_path(self, src_path: Path) -> Path:
         #   Derives a destination path for the dmg file from the source path.
@@ -773,7 +886,6 @@ def command_line_run():
                     iof.write(f'"{key}": {val}')
             iof.write("}")
             iof.seek(0)
-            print(iof.getvalue())
             return json.load(iof)
         except Exception as ex:
             raise ValueError(f"could not parse -c/--config arg ({ex})")
