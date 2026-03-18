@@ -949,7 +949,6 @@ def automator_run():
 
 if __name__ == "__main__":
     if sys.argv[0].find("-c") >= 0:
-        command_line_run()
-    else:
-        # FWIW sys.argv[0] in the Automator case appears to be "-c".
         automator_run()
+    else:
+        command_line_run()
