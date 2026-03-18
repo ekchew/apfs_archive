@@ -237,7 +237,7 @@ class APFSArchive:
             return src_path
 
         if self.expand:
-            dst_path = self._expand(src_path)
+            dst_path = self._expand_dmg(src_path)
         elif self.config.clone_files:
             dst_path = self._archive(src_path)
         else:
@@ -505,26 +505,37 @@ class APFSArchive:
         )
         self.scan_path(src_dir, cb)
 
-    def _expand(self, src_path: Path) -> Path:
+    def _expand_dmg(self, src_path: Path) -> Path:
+        outer_name = src_path.stem
+        outer_dst = self.find_unused_dst(
+            self.get_dst_dir(src_path), outer_name
+        )
         with self._mount_dmg(src_path) as mount_path:
-            dst = self.find_unused_dst(
-                self.get_dst_dir(src_path), mount_path.name
-            )
+            inner_name = mount_path.name
+            if inner_name != outer_name:
+                print(
+                    "making directory:", quoted_path(outer_dst.path),
+                    file=self.outf
+                )
+                outer_dst.path.mkdir(parents=True)
+                inner_dst = outer_dst.path/inner_name
+            else:
+                inner_dst = outer_dst.path
             print(
                 "copying", quoted_path(mount_path),
-                "to", quoted_path(dst.path), file=self.outf
+                "to", quoted_path(inner_dst), file=self.outf
             )
-            self._sp_run("ditto", "-v", mount_path, dst.path)
+            self._sp_run("ditto", "-v", mount_path, inner_dst)
         if self.config.clone_files:
             #   In the event that the destination path we bumped by a
             #   pre-existing directory, run a clone-in-place on the most recent
             #   such directory before doing it again on our new destination.
             #   That way, any shared files between the 2 directories should get
             #   cloned.
-            if dst.used_paths:
-                self._clone_in_place(dst.used_paths[-1])
-            self._clone_in_place(dst.path)
-        return dst.path
+            if outer_dst.used_paths:
+                self._clone_in_place(outer_dst.used_paths[-1])
+            self._clone_in_place(outer_dst.path)
+        return outer_dst.path
 
     def _ready_dmg_path(self, src_path: Path) -> Path:
         #   Derives a destination path for the dmg file from the source path.
@@ -870,7 +881,7 @@ def automator_run():
 
 
 if __name__ == "__main__":
-    if sys.argv[0].find("apfs_archive.py") >= 0:
+    if sys.argv[0].find("-c") >= 0:
         command_line_run()
     else:
         # FWIW sys.argv[0] in the Automator case appears to be "-c".
