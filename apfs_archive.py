@@ -479,9 +479,14 @@ class APFSArchive:
         Deletes the target file and replaces it with a clone of the other.
         """
 
+        if target == with_file:
+            print(
+                "WARNING: attempt to clone", quoted_path(target), "to itself",
+                file=self.outf
+            )
+            return
         target.unlink()
-        cmd = ["ditto", "--clone", str(with_file), str(target)]
-        sp.run(cmd, check=True, stdout=self.outf, stderr=sp.STDOUT, text=True)
+        self._sp_run("ditto", "--clone", with_file, target)
 
     def print_run_report(self, dst_path: Path):
         """
@@ -556,11 +561,53 @@ class APFSArchive:
         self.scan_path(src_dir, cb)
 
     def _expand(self, src_path: Path) -> Path:
+
+        #   If src_path is a directory, we want to call the recursive
+        #   _expand_dir() method on it to copy/clone it with all the archives
+        #   found inside it expanded.
+        if src_path.is_dir():
+            dst = self.find_unused_dst(
+                self.get_dst_dir(src_path), src_path.name
+            )
+            self._expand_dir(src_path, dst.path)
+            if self.config.clone_files and dst.used_paths:
+                #   In the event that the destination path was bumped by a
+                #   pre-existing directory, run a clone-in-place on the most
+                #   recent such directory before doing it again on our new
+                #   destination. That way, any shared files between the 2
+                #   directories should get cloned.
+                self._clone_in_place(dst.used_paths[-1])
+                self._clone_in_place(dst.path)
+            return dst.path
+
         match = k_expand_rx.search(src_path.name)
         if not match:
             raise ValueError(f"cannot expand {quoted_path(src_path)}")
+        return self._expand_archive(
+            src_path, self.get_dst_dir(src_path), match
+        )
+
+    def _expand_archive(
+        self, src_path: Path, dst_dir: Path, match: re.Match
+    ) -> Path:
+        #   This is a lower-level method that only handles archive and not
+        #   directory expansion.
+        #
+        #   Args:
+        #       src_path: path to a confirmed archive file
+        #       dst_dir: candidate destination directory
+        #           If it already exists, a new one may be chosen with a "_2"
+        #           or greater ending appended to its name. Also note that if
+        #           the directory name differs from the root level directory
+        #           name within the archive, the contents should appear in an
+        #           inner directory with the root's name.
+        #
+        #   Returns: the destination directory path that was actually chosen
+        #       This would be the one with the "_2" or whatever where
+        #       necessary.
+
         outer_dst = self.find_unused_dst(
-            self.get_dst_dir(src_path), src_path.name[: match.start()]
+            dst_dir, src_path.name[: match.start()]
         )
         if match.group() in (".dmg", ".sparsebundle", ".sparseimage"):
             self._expand_dmg(src_path, outer_dst)
@@ -569,15 +616,72 @@ class APFSArchive:
         else:
             self._expand_tar(src_path, outer_dst)
         if self.config.clone_files:
-            #   In the event that the destination path we bumped by a
-            #   pre-existing directory, run a clone-in-place on the most recent
-            #   such directory before doing it again on our new destination.
-            #   That way, any shared files between the 2 directories should get
-            #   cloned.
+            #   As with the directory expansion case in _expand(), we want to
+            #   scan any pre-existing directory ahead of the new one to
+            #   eliminate the likely duplication between them.
             if outer_dst.used_paths:
                 self._clone_in_place(outer_dst.used_paths[-1])
+
+            #   But in this case, we want to clone the new directory
+            #   regardless. (This wasn't necessary in the other case because
+            #   _expand_dir() should have cloned everything out of the source
+            #   directory already.)
             self._clone_in_place(outer_dst.path)
         return outer_dst.path
+
+    def _expand_dir(self, src_dir: Path, dst_dir: Path) -> int:
+        #   This is a recursive function that transfers the contents of a
+        #   source directory to a destination. Regular files are copied using
+        #   the ditto tool with cloning where possible (i.e. the destination
+        #   files should be cloned provided the 2 directories lie within the
+        #   same APFS volume). When archives are encountered, however, they
+        #   get expanded into the destination directory.
+        #
+        #   Args:
+        #       src_dir: the source directory
+        #       dst_dir: the destination directory
+        #           This is assumed not to exist yet, since find_unused_dst()
+        #           should have been called to generate the outermost
+        #           directory.
+        #
+        #   Returns: number of archives encountered
+
+        arc_matches: list[tuple[Path, re.Match]] = []
+        arcs_found = 0
+        dst_dir.mkdir(parents=True)
+
+        #   This initial loop handles the clone/copying of regular files, but
+        #   defers the archive expansion for later. This is to ensure that the
+        #   archive-level find_unused_dst() logic kicks in after the regular
+        #   files and directories have found their new homes.
+        for src_path in src_dir.iterdir():
+            dst_path = dst_dir/src_path.name
+            if src_path.is_dir(follow_symlinks=False):
+                arcs_found += self._expand_dir(src_path, dst_path)
+            elif src_path.is_symlink():
+                #   Symlinks should be copied as-is.
+                print(
+                    "copying symlink", quoted_path(src_path),
+                    "to", quoted_path(dst_path), file=self.outf
+                )
+                shutil.copy2(src_path, dst_path, follow_symlinks=False)
+            else:
+                match = k_expand_rx.search(src_path.name)
+                if match:
+                    arc_matches.append((src_path, match))
+                else:
+                    print(
+                        "copy/cloning", quoted_path(src_path),
+                        "to", quoted_path(dst_path), file=self.outf
+                    )
+                    self._sp_run("ditto", "--clone", src_path, dst_path)
+
+        #   Now, we go ahead and expand any archives encountered earlier.
+        for arc_path, match in arc_matches:
+            self._expand_archive(arc_path, dst_dir, match)
+
+        arcs_found += len(arc_matches)
+        return arcs_found
 
     def _expand_dmg(self, src_path: Path, outer_dst: FindUnusedDstRes):
         with self._mount_dmg(src_path) as mount_path:
