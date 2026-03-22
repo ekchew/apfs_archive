@@ -272,6 +272,7 @@ Aliases for config keys include:
 | delete_orig | del, delete |
 | dmg_format  | fmt, format |
 | validate    | val         |
+| verbosity   | v, verb     |
 
 For boolean key values, you can even omit the `:true/false` part. By default,
 it will be considered true, but if you prefix the key with `no` or `no_`, it

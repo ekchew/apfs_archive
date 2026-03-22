@@ -52,7 +52,9 @@ k_config_key_aliases: tp.Final[dict[str, str]] = {
     "delete": "delete_orig",
     "fmt": "dmg_format",
     "format": "dmg_format",
-    "val": "validate"
+    "val": "validate",
+    "v": "verbosity",
+    "verb": "verbosity"
 }
 
 k_format_aliases: tp.Final[dict[str, str]] = {
@@ -681,7 +683,9 @@ class APFSArchive:
                 else:
                     if self.config.verbosity >= 3:
                         self._print_from_to("copy/cloning", src_path, dst_path)
-                    self._sp_run("/usr/bin/ditto", "--clone", src_path, dst_path)
+                    self._sp_run(
+                        "/usr/bin/ditto", "--clone", src_path, dst_path
+                    )
 
         #   Now, we go ahead and expand any archives encountered earlier.
         for arc_path, match in arc_matches:
@@ -893,7 +897,9 @@ class APFSArchive:
                 "temporarily mounting:", dmg_path,
                 file=self.outf, flush=True
             )
-        res = self._sp_run("/usr/bin/hdiutil", "attach", dmg_path, stdout=sp.PIPE)
+        res = self._sp_run(
+            "/usr/bin/hdiutil", "attach", dmg_path, stdout=sp.PIPE
+        )
         device = ""
         volume = ""
         for line in res.stdout.splitlines():
