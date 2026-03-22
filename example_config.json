@@ -4,5 +4,6 @@
 	"clone_files": true,
 	"delete_orig": false,
 	"dmg_format": "ULMO",
-	"validate": true
+	"validate": true,
+	"verbosity": 2
 }

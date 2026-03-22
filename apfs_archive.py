@@ -38,7 +38,7 @@ except ImportError:
 # ---- Constants --------------------------------------------------------------
 
 
-k_version: tp.Final[str] = "v1.3.1"
+k_version: tp.Final[str] = "v1.4"
 
 
 #   The following are used in parsing -c / --config args.
@@ -102,6 +102,7 @@ class Config:
     delete_orig: bool = False
     dmg_format: str = "ULMO"  # LZMA-compressed (10.15 Catalina or later)
     validate: bool = True
+    verbosity: int = 2
 
     def save(self):
         json_obj = {
@@ -110,7 +111,8 @@ class Config:
             "clone_files": self.clone_files,
             "delete_orig": self.delete_orig,
             "dmg_format": self.dmg_format,
-            "validate": self.validate
+            "validate": self.validate,
+            "verbosity": self.verbosity
         }
         with open(k_config_path, "w") as outf:
             json.dump(json_obj, outf, indent="\t")
@@ -122,6 +124,7 @@ class Config:
         print("delete_orig:", self.delete_orig, file=outf)
         print("dmg_format:", self.dmg_format, file=outf)
         print("validate:", self.validate, file=outf)
+        print("verbosity:", self.verbosity, file=outf)
         if g_got_xxhash:
             print("xxhash will be used", file=outf)
 
@@ -155,7 +158,8 @@ def config_from_json(json_obj: dict[str, tp.Any], default: Config) -> Config:
         clone_files=json_obj.get("clone_files", default.clone_files),
         delete_orig=json_obj.get("delete_orig", default.delete_orig),
         dmg_format=json_obj.get("dmg_format", default.dmg_format),
-        validate=json_obj.get("validate", default.validate)
+        validate=json_obj.get("validate", default.validate),
+        verbosity=json_obj.get("verbosity", default.verbosity)
     )
 
 
@@ -255,6 +259,7 @@ class APFSArchive:
     clone_in_place: bool = False
     expand: bool = False
     outf: tp.TextIO = sys.stdout
+    errf: tp.TextIO = sys.stderr
     version: bool = False
     run_output: RunOutput = field(default_factory=RunOutput)
 
@@ -279,40 +284,48 @@ class APFSArchive:
         src_stat = src_path.stat()
 
         if self.estimate:
+            if self.config.verbosity == 1:
+                print("scanning:", src_path, file=self.outf, flush=True)
             self._estimate(src_path)
             return src_path
 
         if self.clone_in_place:
+            if self.config.verbosity == 1:
+                print(
+                    "cloning in place:", src_path, file=self.outf, flush=True
+                )
             self._clone_in_place(src_path)
             return src_path
 
         if self.expand:
             dst_path = self._expand(src_path)
-        elif self.config.clone_files:
-            dst_path = self._archive(src_path)
         else:
-            dst_path = self._make_dmg(
-                src_path=src_path, format=self.config.dmg_format
-            )
+            if self.config.verbosity == 1:
+                print(
+                    "creating dmg archive from:", src_path,
+                    file=self.outf, flush=True
+                )
+            if self.config.clone_files:
+                dst_path = self._archive(src_path)
+            else:
+                dst_path = self._make_dmg(
+                    src_path=src_path, format=self.config.dmg_format
+                )
+            if self.config.verbosity == 1:
+                print("created:", dst_path, file=self.outf, flush=True)
 
         if self.config.validate and dst_path.is_file():
-            print(
-                "validating", quoted_path(dst_path),
-                file=self.outf, flush=True
-            )
-            self._sp_run("hdiutil", "verify", dst_path)
+            if self.config.verbosity >= 2:
+                print("validating:", dst_path, file=self.outf, flush=True)
+            self._sp_run("/usr/bin/hdiutil", "verify", dst_path)
 
-        print(
-            "setting", quoted_path(dst_path), "times to match",
-            quoted_path(src_path), file=self.outf
-        )
+        if self.config.verbosity >= 2:
+            self._print_from_to("syncing times", src_path, dst_path)
         os.utime(dst_path, ns=(src_stat.st_atime_ns, src_stat.st_mtime_ns))
 
         if self.config.delete_orig:
-            print(
-                "deleting", quoted_path(src_path),
-                file=self.outf, flush=True
-            )
+            if self.config.verbosity >= 2:
+                print("deleting:", src_path, file=self.outf, flush=True)
             if src_path.is_dir():
                 shutil.rmtree(str(src_path))
             else:
@@ -341,12 +354,8 @@ class APFSArchive:
             used_paths.append(path)
             path = path0.parent/f"{path0.stem}_{index}{path0.suffix}"
             index += 1
-        if used_paths:
-            print(quoted_path(path0), "is already in use", file=self.outf)
-            print(
-                "changing destination to", quoted_path(path), "instead",
-                file=self.outf
-            )
+        if used_paths and self.config.verbosity >= 2:
+            self._print_from_to("changing destination", path0, path)
         return FindUnusedDstRes(path, used_paths)
 
     def scan_path(
@@ -400,10 +409,11 @@ class APFSArchive:
                 )
 
         path = path.resolve()
-        print(
-            "scanning", quoted_path(path), "for file duplication",
-            file=self.outf
-        )
+        if self.config.verbosity >= 2:
+            print(
+                "scanning for file duplication:", path,
+                file=self.outf, flush=True
+            )
         if path.is_dir():
             for base_dir, dir_names, file_names in os.walk(path):
                 for file_name in file_names:
@@ -482,11 +492,11 @@ class APFSArchive:
         if target == with_file:
             print(
                 "WARNING: attempt to clone", quoted_path(target), "to itself",
-                file=self.outf
+                file=self.errf
             )
             return
         target.unlink()
-        self._sp_run("ditto", "--clone", with_file, target)
+        self._sp_run("/usr/bin/ditto", "--clone", with_file, target)
 
     def print_run_report(self, dst_path: Path):
         """
@@ -535,10 +545,10 @@ class APFSArchive:
     def _estimate(self, src_dir: Path):
         def cb(file_path: Path, size: int, match_paths: list[Path]):
             match0 = match_paths[0]
-            print(
-                quoted_path(file_path), f"(size={size})",
-                "likely matches", quoted_path(match0), file=self.outf
-            )
+            if self.config.verbosity >= 3:
+                self._print_from_to(
+                    "cloning may be possible", file_path, match0
+                )
             self.run_output.cloned_bytes += size
 
         #   Since cb doesn't go so far as to call file_data_matches(), we want
@@ -547,17 +557,12 @@ class APFSArchive:
         if not g_got_xxhash:
             print(
                 "please install xxhash (python3 -m pip xxhash)",
-                file=self.outf
+                file=self.errf
             )
             raise NotImplementedError(
                 "estimating clone savings requires xxhash package"
             )
 
-        print(
-            "scanning", quoted_path(src_dir),
-            "to estimate how much data cloning might potentially save",
-            file=self.outf
-        )
         self.scan_path(src_dir, cb)
 
     def _expand(self, src_path: Path) -> Path:
@@ -569,6 +574,10 @@ class APFSArchive:
             dst = self.find_unused_dst(
                 self.get_dst_dir(src_path), src_path.name
             )
+            if self.config.verbosity >= 1:
+                self._print_from_to(
+                    "expanding directory contents", src_path, dst.path
+                )
             self._expand_dir(src_path, dst.path)
             if self.config.clone_files and dst.used_paths:
                 #   In the event that the destination path was bumped by a
@@ -648,6 +657,8 @@ class APFSArchive:
 
         arc_matches: list[tuple[Path, re.Match]] = []
         arcs_found = 0
+        if self.config.verbosity >= 3:
+            print("making directory:", dst_dir)
         dst_dir.mkdir(parents=True)
 
         #   This initial loop handles the clone/copying of regular files, but
@@ -660,21 +671,17 @@ class APFSArchive:
                 arcs_found += self._expand_dir(src_path, dst_path)
             elif src_path.is_symlink():
                 #   Symlinks should be copied as-is.
-                print(
-                    "copying symlink", quoted_path(src_path),
-                    "to", quoted_path(dst_path), file=self.outf
-                )
+                if self.config.verbosity >= 3:
+                    self._print_from_to("copying symlink", src_path, dst_path)
                 shutil.copy2(src_path, dst_path, follow_symlinks=False)
             else:
                 match = k_expand_rx.search(src_path.name)
                 if match:
                     arc_matches.append((src_path, match))
                 else:
-                    print(
-                        "copy/cloning", quoted_path(src_path),
-                        "to", quoted_path(dst_path), file=self.outf
-                    )
-                    self._sp_run("ditto", "--clone", src_path, dst_path)
+                    if self.config.verbosity >= 3:
+                        self._print_from_to("copy/cloning", src_path, dst_path)
+                    self._sp_run("/usr/bin/ditto", "--clone", src_path, dst_path)
 
         #   Now, we go ahead and expand any archives encountered earlier.
         for arc_path, match in arc_matches:
@@ -687,22 +694,22 @@ class APFSArchive:
         with self._mount_dmg(src_path) as mount_path:
             inner_name = mount_path.name
             if inner_name != outer_dst.path.name:
-                print(
-                    "making directory:", quoted_path(outer_dst.path),
-                    file=self.outf
-                )
+                if self.config.verbosity >= 3:
+                    print("making directory:", outer_dst.path, file=self.outf)
                 outer_dst.path.mkdir(parents=True)
                 inner_dir = outer_dst.path/inner_name
             else:
                 inner_dir = outer_dst.path
-            print(
-                "copying", quoted_path(mount_path),
-                "to", quoted_path(inner_dir), file=self.outf
-            )
-            self._sp_run("ditto", "-V", mount_path, inner_dir)
+            if self.config.verbosity >= 2:
+                self._print_from_to("copying", mount_path, inner_dir)
+            elif self.config.verbosity == 1:
+                self._print_from_to("expanding", src_path, inner_dir)
+            v_opt = ["-V"] if self.config.verbosity >= 3 else []
+            self._sp_run("/usr/bin/ditto", *v_opt, mount_path, inner_dir)
 
     def _expand_tar(self, src_path: Path, outer_dst: FindUnusedDstRes):
-        print("scanning", src_path, file=self.outf)
+        if self.config.verbosity >= 3:
+            print("scanning:", src_path, file=self.outf)
         has_root_dir = True
         root_name = ""
         has_metadata = False
@@ -717,7 +724,7 @@ class APFSArchive:
                     root_name = root
                 elif root != root_name:
                     has_root_dir = False
-            if has_metadata:
+            if has_metadata and self.config.verbosity >= 3:
                 print(
                     "Mac-specific file system metadata found",
                     file=self.outf
@@ -725,29 +732,30 @@ class APFSArchive:
             if has_root_dir and root_name == outer_dst.path.name:
                 tar_dir = outer_dst.path.parent
             else:
-                print(
-                    "making directory:", quoted_path(outer_dst.path),
-                    file=self.outf
-                )
+                if self.config.verbosity >= 3:
+                    print(
+                        "making directory:", quoted_path(outer_dst.path),
+                        file=self.outf
+                    )
                 outer_dst.path.mkdir(parents=True)
                 tar_dir = outer_dst.path
-            if has_root_dir:
-                print(
-                    "expanding", quoted_path(src_path), "to",
-                    quoted_path(tar_dir/root_name), file=self.outf
-                )
-            else:
-                print(
-                    "expanding", quoted_path(src_path), "contents into",
-                    quoted_path(tar_dir), file=self.outf
-                )
+            if self.config.verbosity >= 1:
+                if has_root_dir:
+                    self._print_from_to(
+                        "expanding", src_path, tar_dir/root_name
+                    )
+                else:
+                    self._print_from_to(
+                        "expanding contents", src_path, tar_dir
+                    )
             if not has_metadata:
                 tf.extractall(path=str(tar_dir))
                 return
-        self._sp_run("tar", "-xvf", src_path, "-C", tar_dir)
+        self._sp_run("/usr/bin/tar", "-xvf", src_path, "-C", tar_dir)
 
     def _expand_zip(self, src_path: Path, outer_dst: FindUnusedDstRes):
-        print("scanning", src_path, file=self.outf)
+        if self.config.verbosity >= 3:
+            print("scanning:", src_path, file=self.outf)
         has_root_dir = True
         root_name = ""
         has_metadata = False
@@ -765,42 +773,34 @@ class APFSArchive:
                 elif root != root_name:
                     has_root_dir = False
             if has_metadata:
-                print(
-                    "Mac-specific file system metadata found",
-                    file=self.outf
-                )
+                if self.config.verbosity >= 3:
+                    print(
+                        "Mac-specific file system metadata found",
+                        file=self.outf
+                    )
             if has_root_dir and root_name == outer_dst.path.name:
                 unzip_dir = outer_dst.path.parent
             else:
-                print(
-                    "making directory:", quoted_path(outer_dst.path),
-                    file=self.outf
-                )
+                if self.config.verbosity >= 3:
+                    print(
+                        "making directory:", quoted_path(outer_dst.path),
+                        file=self.outf
+                    )
                 outer_dst.path.mkdir(parents=True)
                 unzip_dir = outer_dst.path
-            if has_root_dir:
-                print(
-                    "unzipping", quoted_path(src_path), "to",
-                    quoted_path(unzip_dir/root_name), file=self.outf
-                )
-            else:
-                print(
-                    "unzipping", quoted_path(src_path), "contents into",
-                    quoted_path(unzip_dir), file=self.outf
-                )
+            if self.config.verbosity >= 1:
+                if has_root_dir:
+                    self._print_from_to(
+                        "expanding", src_path, unzip_dir/root_name
+                    )
+                else:
+                    self._print_from_to(
+                        "expanding contents", src_path, unzip_dir
+                    )
             if not has_metadata:
                 zf.extractall(path=str(unzip_dir))
                 return
-        self._sp_run("ditto", "-xkV", src_path, unzip_dir)
-
-    def _ready_dmg_path(self, src_path: Path) -> Path:
-        #   Derives a destination path for the dmg file from the source path.
-        #   If older dmg already exists, it will be deleted.
-        dmg_path = self.get_dst_dir(src_path)/f"{src_path.name}.dmg"
-        if dmg_path.is_file():
-            print("deleting", quoted_path(dmg_path), file=self.outf)
-            dmg_path.unlink()
-        return dmg_path
+        self._sp_run("/usr/bin/ditto", "-xkV", src_path, unzip_dir)
 
     def _make_dmg(
         self, src_path: Path,
@@ -831,13 +831,14 @@ class APFSArchive:
             )
         dmg_path = self.find_unused_dst(self.get_dst_dir(src_path), name).path
         if src_path.is_dir():
-            print(
-                "creating", quoted_path(dmg_path),
-                "from directory", quoted_path(src_path),
-                file=self.outf, flush=True
-            )
+            if self.config.verbosity >= 2:
+                print(
+                    "creating", quoted_path(dmg_path),
+                    "from directory", quoted_path(src_path),
+                    file=self.outf, flush=True
+                )
             self._sp_run(
-                "hdiutil", "create",
+                "/usr/bin/hdiutil", "create",
                 "-srcfolder", src_path,
                 "-fs", "APFS",
                 "-format", format,
@@ -845,13 +846,14 @@ class APFSArchive:
                 dmg_path
             )
         else:
-            print(
-                "converting", quoted_path(dmg_path),
-                "from archive", quoted_path(src_path),
-                file=self.outf, flush=True
-            )
+            if self.config.verbosity >= 2:
+                print(
+                    "converting", quoted_path(dmg_path),
+                    "from archive", quoted_path(src_path),
+                    file=self.outf, flush=True
+                )
             self._sp_run(
-                "hdiutil", "convert", src_path,
+                "/usr/bin/hdiutil", "convert", src_path,
                 "-format", format,
                 "-o", dmg_path
             )
@@ -872,7 +874,8 @@ class APFSArchive:
         try:
             yield dmg_path
         finally:
-            print("deleting", quoted_path(dmg_path), file=self.outf)
+            if self.config.verbosity >= 2:
+                print("deleting", quoted_path(dmg_path), file=self.outf)
             dmg_path.unlink()
 
     @contextmanager
@@ -885,11 +888,12 @@ class APFSArchive:
         you leave the with block.
         """
 
-        print(
-            "temporarily mounting", quoted_path(dmg_path),
-            file=self.outf, flush=True
-        )
-        res = self._sp_run("hdiutil", "attach", dmg_path, stdout=sp.PIPE)
+        if self.config.verbosity >= 2:
+            print(
+                "temporarily mounting:", dmg_path,
+                file=self.outf, flush=True
+            )
+        res = self._sp_run("/usr/bin/hdiutil", "attach", dmg_path, stdout=sp.PIPE)
         device = ""
         volume = ""
         for line in res.stdout.splitlines():
@@ -900,36 +904,51 @@ class APFSArchive:
                 volume = line[i:].strip()
         if not device or not volume:
             raise ValueError("unexpected output from `hdituil attach`")
+        if self.config.verbosity >= 3:
+            print("mounted device:", device, file=self.outf)
+            print("mounted volume:", volume, file=self.outf)
 
         try:
             yield Path(volume)
         finally:
-            print("unmounting", quoted_path(dmg_path), file=self.outf)
-            self._sp_run("hdiutil", "detach", device)
+            if self.config.verbosity >= 2:
+                print("unmounting:", dmg_path, file=self.outf)
+            self._sp_run("/usr/bin/hdiutil", "detach", device)
 
     def _clone_if_data_match(
         self, target: Path, size: int, candidates: list[Path]
     ):
         for candidate in candidates:
             if self.file_data_matches(target, candidate):
-                print(
-                    "cloning", quoted_path(target),
-                    "from", quoted_path(candidate),
-                    f"(size={size})", file=self.outf
-                )
+                if self.config.verbosity >= 3:
+                    self._print_from_to(
+                        f"cloning {size}-byte file", candidate, target)
                 self.clone_file(target, candidate)
                 self.run_output.cloned_bytes += size
                 break
         else:
-            print("same hash matches multiple files", file=self.outf)
+            print("WARNING: same hash matches multiple files", file=self.errf)
             candidates.append(target)
 
     def _sp_run(self, *args, **kwargs) -> sp.CompletedProcess:
+        if self.config.verbosity >= 3:
+            print(">", shlex.join(map(str, args)), file=self.outf)
         kwargs.setdefault("check", True)
-        kwargs.setdefault("stdout", self.outf)
-        kwargs.setdefault("stderr", sp.STDOUT)
+        kwargs.setdefault(
+            "stdout", self.outf if self.config.verbosity >= 2 else sp.DEVNULL
+        )
+        kwargs.setdefault(
+            "stderr", sp.STDOUT if self.config.verbosity >= 2 else self.errf
+        )
         kwargs.setdefault("text", True)
         return sp.run([str(a) for a in args], **kwargs)
+
+    def _print_from_to(self, prompt: str, from_path: Path, to_path: Path):
+        print(prompt, "from:", file=self.outf)
+        print(f"\t{from_path}", file=self.outf)
+        print(f"to:\t{to_path}", file=self.outf)
+        if self.config.verbosity <= 2:
+            self.outf.flush()
 
 
 # ---- Stand Alone Utility Functions ------------------------------------------
@@ -1062,15 +1081,12 @@ def command_line_run():
     ap.add_argument(
         "-x", "--expand", action="store_true",
         help="""
-            With this option, the SRC_PATH should be a dmg file. Its contents
-            get expanded out to a regular directory. If the clone_files config
-            is selected (it is by default), it will also run a clone-in-place
-            on the expanded directory. In the case where the destination is
-            something like foo_2 because foo was already taken, the cloning
-            will apply to both directories together. The idea is that it is
-            likely there will be significant overlap between the two
-            directories.
-           """
+            With the expand option, a dmg file's contents are expanded out into
+            a directory. apfs_archive can also expand other formats like zip
+            and tar, and if you pass in a directory, it clones the directory
+            and expands any archives within it as it goes. See the READ_ME for
+            more details.
+            """
     )
     ap.add_argument(
         "--version", action="store_true",
@@ -1104,18 +1120,23 @@ def command_line_run():
 
         arc.estimate = res.estimate
         arc.clone_in_place = res.clone_in_place
-        arc.config.display(outf=sys.stdout)
         arc.expand = res.expand
-        print("estimate mode:", arc.estimate)
-        print("clone_in_place mode:", not arc.estimate and arc.clone_in_place)
-        print(
-            "expand mode:",
-            not (arc.estimate or arc.clone_in_place) and
-            arc.expand
-        )
+        if arc.config.verbosity >= 2:
+            arc.config.display(outf=sys.stdout)
+            print("estimate mode:", arc.estimate)
+            print(
+                "clone_in_place mode:",
+                not arc.estimate and arc.clone_in_place
+            )
+            print(
+                "expand mode:",
+                not (arc.estimate or arc.clone_in_place) and
+                arc.expand
+            )
         collect_output = arc.estimate or arc.clone_in_place
 
         if res.src_paths:
+            dst_path = Path()
             err: tp.Optional[Exception] = None
             for src_path in map(Path, res.src_paths):
                 try:
@@ -1123,17 +1144,19 @@ def command_line_run():
                         arc.run_output.clear()
                     dst_path = arc.run(src_path=src_path)
                     if not collect_output:
-                        arc.print_run_report(dst_path)
+                        if arc.estimate or arc.config.verbosity >= 2:
+                            arc.print_run_report(dst_path)
                 except Exception as err0:
                     err = err or err0
             if err:
                 raise err
-            if collect_output:
+            if collect_output and (arc.estimate or arc.config.verbosity >= 2):
                 arc.print_run_report(dst_path)
         else:
-            print("no directories specified", file=arc.outf)
+            print("WARNING: no directories specified", file=arc.errf)
 
-        print("complete", file=arc.outf)
+        if arc.config.verbosity >= 2:
+            print("complete", file=arc.outf)
     except Exception as err:
         print("ERROR:", err, file=sys.stderr)
         if k_version.find("dev") >= 0:
@@ -1147,14 +1170,16 @@ def automator_run():
         cmd = ["open", "-a", "Console", str(log_path)]
         sp.run(cmd, stdout=outf, stderr=sp.STDOUT, text=True)
         arc = APFSArchive(outf=outf)
-        arc.config.display(outf=outf)
+        if arc.config.verbosity >= 2:
+            arc.config.display(outf=outf)
         err: tp.Optional[Exception] = None
         for src_path in map(Path, sys.argv[1:]):
             try:
                 arc.run_output.clear()
                 if arc.config.auto_expand:
                     arc.expand = not src_path.is_dir()
-                arc.print_run_report(arc.run(src_path=src_path))
+                if arc.config.verbosity >= 2:
+                    arc.print_run_report(arc.run(src_path=src_path))
             except Exception as err0:
                 err = err or err0
         if err:

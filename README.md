@@ -1,4 +1,4 @@
-# apfs_archive 1.3.1
+# apfs_archive 1.4
 
 A utility for creating compressed .dmg files on the macOS platform that uses
 APFS cloning to further reduce archive size.
@@ -28,13 +28,157 @@ You can enter:
 
 to see usage notes on this script. Generally, you just enter:
 
-    python3 apfs_archive.py /path/to/foo_dir
+    python3 apfs_archive.py /path/to/foo/
 
 and it produces a:
 
-    /path/to/foo_dir.dmg
+    /path/to/foo.dmg
 
-(Note that if the latter already exists, it will get overwritten.)
+(Note that if the latter already exists, you may get a `foo_2.dmg` instead.)
+
+The source path could also be another dmg file. Let's say you created a
+`bar.dmg` earlier, but want to see if you can make it smaller by cloning away
+any file duplication within it? Running:
+
+    python3 apfs_archive.py bar.dmg
+
+should produce a `bar_2.dmg` file that has been run through the cloning phase.
+
+That's it for basic usage, but there are numerous configuration and command
+line options you can set up to use the script in various ways. For example,
+you can expand a dmg back into a folder with `-x`. These are covered next.
+
+### Command Line Options
+
+#### `-d DIR_PATH` or `--dst-dir=DIR_PATH`
+
+By default, the destination path is inferred from the source. For example, if
+the source path were:
+
+    /path/to/foo/
+
+the destination might be:
+
+    /path/to/foo.dmg
+
+As you can see, the file goes into the same parent directory as the source,
+and its name is also derived from the source.
+
+But you can change the destination directory. With `-d /path/to/bar/`, you
+would get:
+
+    /path/to/bar/foo.dmg
+
+instead.
+
+Note that if a `foo.dmg` file already exists at the destination, the script may
+go with `foo_2.dmg` (or even `foo_3.dmg` if `foo_2.dmg` is also taken, and so
+on).
+
+#### `-e` or `--estimate`
+
+With this option, no dmg is created. Rather, the source directory is scanned to
+estimate how much space may be saved just from eliminating file duplication
+through cloning.
+
+Since this option is meant to use only a quick single pass scan of the file
+data, it requires the 128-bit hash function you get with the
+[xxhash](https://xxhash.com) package. This can be installed with:
+
+    python3 -m pip install xxhash
+
+Note that the true amount of space saved will likely differ from the estimate
+because:
+
+* it only consider a file's data size
+  * in actuality, there is additional file system overhead
+* for dmg archiving:
+  * it does not account for what the compression phase may do
+* for `--clone-in-place` operations:
+  * it can't tell if any of the files have already been cloned
+
+#### `-C FILE_PATH.json` or `--config-file=FILE_PATH.json`
+
+This sets the default configuration options to those loaded from the specified
+JSON file. Technically, it installs your file at:
+
+    ~/Library/Preferences/apfs_archive.json
+
+Besides the `apfs_archive.py` script itself, if you build the Automator app,
+it too will grab the default configuration parameters from there.
+
+See the Configuration section further down for more info on what parameters
+you can adjust.
+
+#### `-c ARG` or `--config=ARG`
+
+You can supply 1 or more `-c` options to override configuration defaults.
+For example, if you wanted to delete the original after archiving in just this
+once instance, you could write `-c delete_orig`.
+
+In the Configuration section, there is a subsection that covers the short-hand
+syntax you can use with this option.
+
+#### `-p` or `--clone-in-place`
+
+As with the `-e` option, no dmg is created with this option. Rather, the source
+directory is scanned, and duplicate files found within it are replaced by
+clones in the hopes of freeing up space.
+
+As mentioned with `-e`, the actual amount of space you recover may depend on
+whether any of the files had already been cloned.
+
+#### `-x` or `--expand`
+
+Rather than creating dmg archives, this option expands them back out into
+folders at the destination. In other word, `foo.dmg` turns back into `foo/`.
+The script can also expand tar and zip files.
+
+Once expanded, the destination folder gets a clone-in-place pass (unless you
+suppress this by setting the `clone_files` flag false).
+
+If you try to expand a directory instead of an archive file, it will attempt
+to clone everything in the source directory to the destination except for any
+archive files it encounters. These will get expanded to the destination.
+
+So that's the executive summary. Now onto the nitty gritty details.
+
+* archive files are recognized by any of the following file extensions:
+  * `.dmg`
+  * `.sparseimage`
+  * `.sparsebundle`
+  * `.tar`
+  * `.tar.gz` or `.tgz`
+  * `.tar.bz` or `.tbz`
+  * `.tar.bz2` or `.tbz2`
+  * `.tar.xz` or `.txz`
+  * `.tar.zst` or `.zst`
+  * `.zip`
+* archive files are scanned first before being expanded
+  * consider a file named `foo.dmg` containing a volume called `foo`
+    * this should expand into a `foo/` directory at the destination
+  * now say the volume was called `bar` instead
+    * this should then expand into a `foo/bar/` directory
+    * so both the archive name and internal volume name are preserved
+  * now say the volume is `foo` again but a `foo` directory already exists
+    * in this case, the volume should expand into `foo_2/foo/`
+  * tar and zip archives may not even contain a root directory
+    * say `foo.zip` contained `bar.txt` and `baz.dat`
+      * you would get a `foo/` directory containing those 2 files
+  * the script also looks for Mac metadata while scanning tar and zip archives
+    * if found:
+      * the `usr/bin/tar` tool is used to expand tar files
+      * the `usr/bin/ditto` tool is used to expand zip files
+      * these should handle the metadata properly if run on a Mac
+    * if not found, Python's standard library handles the expansion
+* in the clone-in-place phase
+  * say your image expanded into `foo_2` because `foo` already existed
+    * both directories would then be scanned together for clone-in-place
+    * the idea is that it's likely they duplicate each other a lot
+
+#### `--version`
+
+Simply prints a version string and quits.
 
 ### Configuration
 
@@ -49,6 +193,7 @@ on the `apfs_archive.py` command line using the `-c` switch. They include
 | delete_orig | delete original after successfully processing       | false   |
 | dmg_format  | hdiutil format code to select .dmg compression type | "ULMO"  |
 | validate    | run hdiutil verify on new dmgs                      | true    |
+| verbosity   | affects how much info gets logged during script run | 2       |
 
 Note that within a JSON file, the keys would need to be enclosed in "".
 
@@ -58,6 +203,13 @@ clone the files within them (assuming clone_files is true).
 The validate option is not strictly necessary, but may provide some peace of
 mind when using it in conjunction with delete_orig, as the the deletion will
 not take place until validation has completed successfully.
+
+The verbosity levels work as follows:
+
+0. stdout is effectively disabled, but stderr is still functional.
+1. Logs a message for each general operation like archiving, expanding, etc.
+2. More steps in terms of making temporary dmgs and such are logged.
+3. Logging goes down to the individual file level for cloning, etc.
 
 #### buf_size
 
@@ -202,12 +354,28 @@ duplicate files. You can install it with:
 (It is also required if you want to use the script's -e option. Enter
 `python3 apfs_archive.py -h` for more details.)
 
+## Known Issues
+
+* occasionally, the script tries to clone a file to itself
+  * I have not identified the cause, but block the attempt and log a warning
+* the direct dmg re-encoding sometimes fails on a error from `hdiutil`
+  * it seems you can work around this by expanding to folder and re-archiving?
+* the re-encoding can occasionally result in a *bigger* dmg
+  * this may have something to do with extra file system overhead introduced?
+  * this only tends to happen when cloning opportunities are meagre
+  * at any rate, it's best to check if new dmg is really smaller than the old
+
 ## Revision History
 
 Note: Starting with v1.2.2, new development will be done in separate git
 branches that are periodically merged into the main one. That is when this
 READ_ME will be updated and a new version number assigned. I aspire to make
 these numbered releases stable builds.
+
+1.4 (2026-03-21)
+
+* `-x` option added to expand archives
+* minor bug fixes
 
 1.3.1 (2026-03-16)
 
