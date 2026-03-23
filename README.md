@@ -128,6 +128,11 @@ clones in the hopes of freeing up space.
 As mentioned with `-e`, the actual amount of space you recover may depend on
 whether any of the files had already been cloned.
 
+Note that if you specify more than one directory on the command line, the
+cloning can occur both within and between directories. This contrasts with
+archiving, in which case each path becomes its own dmg and no cross-cloning
+between dmgs is possible.
+
 #### `-x` or `--expand`
 
 Rather than creating dmg archives, this option expands them back out into
