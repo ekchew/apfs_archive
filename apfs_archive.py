@@ -218,13 +218,15 @@ class RunOutput:
 
     total_bytes: int = 0
     cloned_bytes: int = 0
-    scanned_files: dict[FileSig, list[Path]] = field(default_factory=dict)
+    scanned_dict: dict[FileSig, list[Path]] = field(default_factory=dict)
+    scanned_set: set[Path] = field(default_factory=set)
     expand_filter: Callable[[str], bool] = lambda p: True
 
     def clear(self):
         self.total_bytes = 0
         self.cloned_bytes = 0
-        self.scanned_files.clear()
+        self.scanned_dict.clear()
+        self.scanned_set.clear()
 
 
 @dataclass
@@ -422,16 +424,19 @@ class APFSArchive:
         """
 
         def check_file(file_path: Path):
+            if file_path in self.run_output.scanned_set:
+                return
+            self.run_output.scanned_set.add(file_path)
             file_sig = self.scan_file_data(path=file_path)
             if file_sig.size == 0:
                 return
             self.run_output.total_bytes += file_sig.size
             try:
-                matching_files = self.run_output.scanned_files[
+                matching_files = self.run_output.scanned_dict[
                     file_sig
                 ]
             except KeyError:
-                self.run_output.scanned_files[file_sig] = [file_path]
+                self.run_output.scanned_dict[file_sig] = [file_path]
             else:
                 handle_file_sig_match(
                     file_path, file_sig.size, matching_files

@@ -445,8 +445,6 @@ duplicate files. You can install it with:
 
 ## Known Issues
 
-* occasionally, the script tries to clone a file to itself
-  * I have not identified the cause, but block the attempt and log a warning
 * the direct dmg re-encoding sometimes fails on a error from `hdiutil`
   * it seems you can work around this by expanding to folder and re-archiving?
 * the re-encoding can occasionally result in a *bigger* dmg
