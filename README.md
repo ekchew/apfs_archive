@@ -192,7 +192,6 @@ on the `apfs_archive.py` command line using the `-c` switch. They include
 
 | Key              | Value                                               | Default   |
 | :--------------- | :-------------------------------------------------- | --------: |
-| `auto_expand`    | Automator expands files and archives directories    | `true`    |
 | `buf_size`       | maximum bytes read from a file at a time            | `1048576` |
 | `clone_files`    | do actually scan for duplicate files and clone them | `true`    |
 | `delete_orig`    | delete original after successfully processing       | `false`   |
@@ -202,11 +201,6 @@ on the `apfs_archive.py` command line using the `-c` switch. They include
 | `verbosity`      | affects how much info gets logged during script run | `2`       |
 
 Note that within a JSON file, the keys would need to be enclosed in `""`.
-
-#### auto_expand
-
-If `auto_expand` is set false, Automator will remake the dmgs instead to try to
-clone the files within them (assuming clone_files is true).
 
 #### buf_size
 
@@ -403,8 +397,12 @@ what not. I have not experimented with this personally.)
 
 #### Using the Automator App
 
-When you drag a folder onto the app, it should create a dmg in the same parent
-folder. It also opens the Console utility so that you can watch its progress.
+When you drag a something onto the app, it should create a dmg in the same
+parent folder. It also opens the Console utility so that you can watch its
+progress.
+
+If you are hold down the alt (option) key while you drop it, it will expand it
+instead.
 
 There is no graphic interface for configuring the app, but it reads its config
 from `~/Library/Preferences/apfs_archive.json`. You can install your own config

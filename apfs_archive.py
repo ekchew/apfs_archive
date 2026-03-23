@@ -94,7 +94,7 @@ return (button returned of result) is "Yes"
 """
 
 
-k_applescript_option_down: tp.Final[str] = """
+k_applescript_alt_down: tp.Final[str] = """
 use scripting additions
 use framework "Foundation"
 use framework "AppKit" -- for NSEvent
@@ -118,7 +118,6 @@ class Config:
     The configuration attributes are described in the READ_ME file.
     """
 
-    auto_expand: bool = True
     blk_size: int = 0x100000  # default = 1 MB
     clone_files: bool = True
     delete_orig: bool = False
@@ -129,7 +128,6 @@ class Config:
 
     def save(self):
         json_obj = {
-            "auto_expand": self.auto_expand,
             "blk_size": self.blk_size,
             "clone_files": self.clone_files,
             "delete_orig": self.delete_orig,
@@ -142,7 +140,6 @@ class Config:
             json.dump(json_obj, outf, indent="\t")
 
     def display(self, outf: tp.TextIO):
-        print("auto_expand:", self.auto_expand, file=outf)
         print("blk_size:", self.blk_size, file=outf)
         print("clone_files:", self.clone_files, file=outf)
         print("delete_orig:", self.delete_orig, file=outf)
@@ -180,7 +177,6 @@ def config_from_json(json_obj: dict[str, tp.Any], default: Config) -> Config:
     expand_filters = json_obj.get("expand_filters", []) \
         + default.expand_filters
     return Config(
-        auto_expand=json_obj.get("auto_expand", default.auto_expand),
         blk_size=json_obj.get("blk_size", default.blk_size),
         clone_files=json_obj.get("clone_files", default.clone_files),
         delete_orig=json_obj.get("delete_orig", default.delete_orig),
@@ -578,6 +574,15 @@ class APFSArchive:
                 percentage = arc_size * 100.0 / ro.total_bytes
                 self.outf.write(f" ({percentage:.2f}%)")
             print(file=self.outf)
+
+    def alt_down(self) -> bool:
+        """
+        Returns: True if user is currently holding down alt (option) key
+        """
+        res = self._sp_run(
+            "osascript", "-", input=k_applescript_alt_down, stdout=sp.PIPE
+        )
+        return res.stdout.strip() == "true"
 
     def _archive(self, src_path: Path) -> Path:
         with self._make_tmp_dmg(src_path) as tmp_dmg:
@@ -1367,6 +1372,8 @@ def command_line_run():
         #   Library/Preferences.
         arc = APFSArchive(dst_dir=dst_dir)
 
+        print("alt down:", arc.alt_down())
+
         #   Next, override the defaults with anything specified through
         #   -c (--config) options.
         arc.config = config_from_json(parse_c_opts(res), arc.config)
@@ -1420,17 +1427,17 @@ def command_line_run():
 def automator_run():
     log_path = Path.home()/"Library"/"Logs"/"apfs_archive.log"
     with open(log_path, "w") as outf:
+        arc = APFSArchive(outf=outf)
+        arc.expand = arc.alt_down()
         cmd = ["open", "-a", "Console", str(log_path)]
         sp.run(cmd, stdout=outf, stderr=sp.STDOUT, text=True)
-        arc = APFSArchive(outf=outf)
         if arc.config.verbosity >= 2:
             arc.config.display(outf=outf)
+            print("expand:", arc.expand, file=outf)
         err: tp.Optional[Exception] = None
         for src_path in map(Path, sys.argv[1:]):
             try:
                 arc.run_output.clear()
-                if arc.config.auto_expand:
-                    arc.expand = not src_path.is_dir()
                 if arc.config.verbosity >= 2:
                     arc.print_run_report(arc.run(src_path=src_path))
             except Exception as err0:
