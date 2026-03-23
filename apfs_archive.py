@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 
 from argparse import ArgumentParser
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from fnmatch import fnmatch, fnmatchcase
 from pathlib import Path
 from zipfile import ZipFile
 import io
@@ -38,7 +39,7 @@ except ImportError:
 # ---- Constants --------------------------------------------------------------
 
 
-k_version: tp.Final[str] = "v1.4"
+k_version: tp.Final[str] = "v1.4dev"
 
 
 #   The following are used in parsing -c / --config args.
@@ -54,7 +55,8 @@ k_config_key_aliases: tp.Final[dict[str, str]] = {
     "format": "dmg_format",
     "val": "validate",
     "v": "verbosity",
-    "verb": "verbosity"
+    "verb": "verbosity",
+    "xf": "expand_filter"
 }
 
 k_format_aliases: tp.Final[dict[str, str]] = {
@@ -85,6 +87,24 @@ k_expand_rx: tp.Final[tp.Pattern] = re.compile(
 )
 
 
+k_applescript_ask_expand: tp.Final[str] = """
+use scripting additions
+get display dialog "Expand %s?" buttons {"No", "Yes"} default button "Yes"
+return (button returned of result) is "Yes"
+"""
+
+
+k_applescript_option_down: tp.Final[str] = """
+use scripting additions
+use framework "Foundation"
+use framework "AppKit" -- for NSEvent
+
+set flags to current application's NSEvent's modifierFlags() as integer
+set mask to current application's NSAlternateKeyMask as integer
+return ((flags div mask) mod 2) as boolean
+"""
+
+
 # ---- Config Management ------------------------------------------------------
 
 
@@ -103,6 +123,7 @@ class Config:
     clone_files: bool = True
     delete_orig: bool = False
     dmg_format: str = "ULMO"  # LZMA-compressed (10.15 Catalina or later)
+    expand_filters: list[str] = field(default_factory=lambda: [":*"])
     validate: bool = True
     verbosity: int = 2
 
@@ -113,6 +134,7 @@ class Config:
             "clone_files": self.clone_files,
             "delete_orig": self.delete_orig,
             "dmg_format": self.dmg_format,
+            "expand_filters": self.expand_filters,
             "validate": self.validate,
             "verbosity": self.verbosity
         }
@@ -125,6 +147,7 @@ class Config:
         print("clone_files:", self.clone_files, file=outf)
         print("delete_orig:", self.delete_orig, file=outf)
         print("dmg_format:", self.dmg_format, file=outf)
+        print("expand_filters", self.expand_filters, file=outf)
         print("validate:", self.validate, file=outf)
         print("verbosity:", self.verbosity, file=outf)
         if g_got_xxhash:
@@ -154,12 +177,15 @@ def config_from_json(json_obj: dict[str, tp.Any], default: Config) -> Config:
             Any keys that cannot be found in json_obj are obtained from this
             instance instead. It is usually just a default-initialized Config.
     """
+    expand_filters = json_obj.get("expand_filters", []) \
+        + default.expand_filters
     return Config(
         auto_expand=json_obj.get("auto_expand", default.auto_expand),
         blk_size=json_obj.get("blk_size", default.blk_size),
         clone_files=json_obj.get("clone_files", default.clone_files),
         delete_orig=json_obj.get("delete_orig", default.delete_orig),
         dmg_format=json_obj.get("dmg_format", default.dmg_format),
+        expand_filters=expand_filters,
         validate=json_obj.get("validate", default.validate),
         verbosity=json_obj.get("verbosity", default.verbosity)
     )
@@ -193,6 +219,7 @@ class RunOutput:
     total_bytes: int = 0
     cloned_bytes: int = 0
     scanned_files: dict[FileSig, list[Path]] = field(default_factory=dict)
+    expand_filter: Callable[[str], bool] = lambda p: True
 
     def clear(self):
         self.total_bytes = 0
@@ -500,6 +527,24 @@ class APFSArchive:
         target.unlink()
         self._sp_run("/usr/bin/ditto", "--clone", with_file, target)
 
+    def compile_expand_filter(self):
+        """
+        This method compiles an expand filter function calculated from
+        `config.expand_filters` and stores it at `run_output.expand_filter`.
+        It is called automatically by `run` if `expand` is selected.
+        """
+
+        def ask_user(path_str: str) -> bool:
+            res = self._sp_run(
+                "osascript", "-",
+                input=k_applescript_ask_expand % (path_str,), stdout=sp.PIPE
+            )
+            return res.stdout.strip() == "true"
+
+        self.run_output.expand_filter = compile_path_filter(
+            filters=self.config.expand_filters, catch_all=ask_user
+        )
+
     def print_run_report(self, dst_path: Path):
         """
         During a run(), some metrics are collected in run_output. This method
@@ -568,6 +613,7 @@ class APFSArchive:
         self.scan_path(src_dir, cb)
 
     def _expand(self, src_path: Path) -> Path:
+        self.compile_expand_filter()
 
         #   If src_path is a directory, we want to call the recursive
         #   _expand_dir() method on it to copy/clone it with all the archives
@@ -678,7 +724,7 @@ class APFSArchive:
                 shutil.copy2(src_path, dst_path, follow_symlinks=False)
             else:
                 match = k_expand_rx.search(src_path.name)
-                if match:
+                if match and self.run_output.expand_filter(str(src_path)):
                     arc_matches.append((src_path, match))
                 else:
                     if self.config.verbosity >= 3:
@@ -957,7 +1003,190 @@ class APFSArchive:
             self.outf.flush()
 
 
-# ---- Stand Alone Utility Functions ------------------------------------------
+# ---- Stand-Alone Utility Functions ------------------------------------------
+
+
+def compile_path_filter(
+    filters: Iterable[str],
+    catch_all: Callable[[str], bool] = lambda _: True
+) -> Callable[[str], bool]:
+    """
+    The logic that compiles apfs_archive's expand filter has been spun out into
+    its own stand-alone function in case you find it useful in other contexts?
+
+    The compilation involves reducing the invariant parts of each filter's
+    algorithm using closures.
+
+    Args:
+        filters:
+            Each string in this iterable represents a filter as described in
+            the READ_ME (e.g. "x:*.txt" if you wanted to exclude text files
+            for some reason).
+        catch_all:
+            A callback that handle the case in which none of the filters
+            match the path string. The default callback simply returns `True`.
+
+    Returns: a single function that takes a path and returns a boolean
+        The boolean indicates whether the path should be accepted or rejected.
+        Note that the path needs to be in string form.
+    """
+
+    # ---- Filter Function Factories ------------------------------------------
+    #
+    #   8 factories are defined here to cover every possible combination of
+    #   flags, of which there are 3.
+    #
+    #   Each factory takes a pattern string. That's the part following the the
+    #   ":" in the filter definition. The return value is a function that takes
+    #   a path in string form and returns an integer. The integer may be 1 for
+    #   accept, -1 for reject, or 0 for filter did not match.
+    #
+    #   The # in make_fn# indicates the index at which the factory will reside
+    #   within the upcoming `factories` tuple. The factories are ordered in
+    #   such a way as to line up with the integer flags value returned by
+    #   `calc_fn_index`.
+
+    def make_fn0(pattern: str) -> Callable[[str], int]:  # flags: ""
+
+        def fn(path_str: str) -> int:
+            return 1 if fnmatch(path_str, pattern) else 0
+
+        return fn
+
+    def make_fn1(pattern: str) -> Callable[[str], int]:  # flags: "x"
+
+        def fn(path_str: str) -> int:
+            return -1 if fnmatch(path_str, pattern) else 0
+
+        return fn
+
+    def make_fn2(pattern: str) -> Callable[[str], int]:  # flags: "c"
+
+        def fn(path_str: str) -> int:
+            return 1 if fnmatchcase(path_str, pattern) else 0
+
+        return fn
+
+    def make_fn3(pattern: str) -> Callable[[str], int]:  # flags: "xc"
+
+        def fn(path_str: str) -> int:
+            return -1 if fnmatchcase(path_str, pattern) else 0
+
+        return fn
+
+    def make_fn4(pattern: str) -> Callable[[str], int]:  # flags: "r"
+        rx = re.compile(pattern, re.IGNORECASE)
+
+        def fn(path_str: str) -> int:
+            return 1 if rx.search(path_str) else 0
+
+        return fn
+
+    def make_fn5(pattern: str) -> Callable[[str], int]:  # flags: "xr"
+        rx = re.compile(pattern, re.IGNORECASE)
+
+        def fn(path_str: str) -> int:
+            return -1 if rx.search(path_str) else 0
+
+        return fn
+
+    def make_fn6(pattern: str) -> Callable[[str], int]:  # flags: "cr"
+        rx = re.compile(pattern)
+
+        def fn(path_str: str) -> int:
+            return 1 if rx.search(path_str) else 0
+
+        return fn
+
+    def make_fn7(pattern: str) -> Callable[[str], int]:  # flags: "xcr"
+        rx = re.compile(pattern)
+
+        def fn(path_str: str) -> int:
+            return -1 if rx.search(path_str) else 0
+
+        return fn
+
+    factories = (
+        make_fn0,
+        make_fn1,
+        make_fn2,
+        make_fn3,
+        make_fn4,
+        make_fn5,
+        make_fn6,
+        make_fn7
+    )
+
+    # --- Filter Function Look-Up ---------------------------------------------
+
+    k_flag_list = "xcr"
+
+    def calc_fn_index(flags: str) -> int:
+        #   Given the flags in string form (e.g. "xc"), this function returns
+        #   them as an integer index that should line up with the appropriate
+        #   factory function in `factories` (e.g. 3 for "xc").
+        #
+        #   Args:
+        #       flags: flags in string form
+        #   Returns: flags in integer form
+        index = 0
+        for flag in flags:
+
+            #   The `k_flag_list` string gives the possible flag characters in
+            #   such an order that the position specifies a bit number within
+            #   the index integer.
+            pos = k_flag_list.find(flag)
+            if pos < 0:
+                raise ValueError(
+                    f'unrecognized flag "{flag}" in expand filter'
+                )
+
+            #   Turn the position into a bit mask and set the appropriate bit
+            #   within `index`.
+            index |= 1 << pos
+        return index
+
+    # ---- Build List of Functions Matching Each Filter -----------------------
+    #
+    #   Each filter string in `filters` needs to get a corresponding function
+    #   that can be called to apply the filter.
+
+    filter_fns: list[Callable[[str], int]] = []
+    for fltr in filters:
+
+        #   Ideally, every filter string should have the format
+        #   "FLAGS:PATTERN", but it is possible we may only have "PATTERN".
+        parts = fltr.split(":", maxsplit=1)
+        if len(parts) == 1:
+            parts = ("", parts[0])
+        flags, pattern = parts
+
+        #   A blank pattern indicates that any further filters are to be
+        #   discarded, and the catch-all should handle anything that makes it
+        #   this far.
+        if not pattern:
+            break
+
+        #   Use the flags to determine the appropriate factory function to
+        #   create the filter function, and build it around the pattern.
+        filter_fns.append(factories[calc_fn_index(flags)](pattern))
+
+    # ---- Define the Combined Filter Function --------------------------------
+    #
+    #   This function should run through all the `filter_fns` looking for a
+    #   match to the given path. Failing that, it should fall back on the
+    #   catch-all function.
+
+    def combined_filter_fn(path_str: str) -> bool:
+        for fn in filter_fns:
+            res = fn(path_str)
+            if res > 0:
+                return True
+            if res < 0:
+                return False
+        return catch_all(path_str)
+
+    return combined_filter_fn
 
 
 def quoted_path(path: Path) -> str:
@@ -991,11 +1220,8 @@ def command_line_run():
             iof = io.StringIO()
             iof.write("{")
             if parse_res.config:
+                expand_filters: list[str] = []
                 for arg in parse_res.config:
-                    if first:
-                        first = False
-                    else:
-                        iof.write(", ")
                     tup = arg.split(":", 1)
                     key = tup[0].strip().strip('"')
                     if len(tup) == 1:
@@ -1006,15 +1232,31 @@ def command_line_run():
                         else:
                             val = "true"
                     else:
-                        val = tup[1].strip()
+                        val = tup[1].strip().strip('"')
                     key = k_config_key_aliases.get(key, key)
                     if key == "dmg_format":
-                        val = val.strip('"').upper()
+                        val = val.upper()
                         val = k_format_aliases.get(val, val)
                         val = f'"{val}"'
+                    elif key == "expand_filter":
+                        expand_filters.append(val)
+                        continue
+                    elif key == "expand_filters":
+                        expand_filters.extend(json.loads(val))
+                        continue
+                    if first:
+                        first = False
+                    else:
+                        iof.write(", ")
                     iof.write(f'"{key}": {val}')
+                if expand_filters:
+                    if not first:
+                        iof.write(", ")
+                    iof.write('"expand_filters": ')
+                    json.dump(expand_filters, iof)
             iof.write("}")
             iof.seek(0)
+            print(iof.getvalue())
             return json.load(iof)
         except Exception as ex:
             raise ValueError(f"could not parse -c/--config arg ({ex})")

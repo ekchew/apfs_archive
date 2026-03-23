@@ -1,4 +1,4 @@
-# apfs_archive 1.4
+# apfs_archive 1.4dev
 
 A utility for creating compressed .dmg files on the macOS platform that uses
 APFS cloning to further reduce archive size.
@@ -185,31 +185,23 @@ Simply prints a version string and quits.
 Configuration options can either be loaded from a JSON file or set individually
 on the `apfs_archive.py` command line using the `-c` switch. They include
 
-| Key         | Value                                               | Default |
-| :---------- | :-------------------------------------------------- | ------: |
-| auto_expand | Automator expands files and archives directories    | true    |
-| buf_size    | maximum bytes read from a file at a time            | 1048576 |
-| clone_files | do actually scan for duplicate files and clone them | true    |
-| delete_orig | delete original after successfully processing       | false   |
-| dmg_format  | hdiutil format code to select .dmg compression type | "ULMO"  |
-| validate    | run hdiutil verify on new dmgs                      | true    |
-| verbosity   | affects how much info gets logged during script run | 2       |
+| Key              | Value                                               | Default   |
+| :--------------- | :-------------------------------------------------- | --------: |
+| `auto_expand`    | Automator expands files and archives directories    | `true`    |
+| `buf_size`       | maximum bytes read from a file at a time            | `1048576` |
+| `clone_files`    | do actually scan for duplicate files and clone them | `true`    |
+| `delete_orig`    | delete original after successfully processing       | `false`   |
+| `dmg_format`     | hdiutil format code to select .dmg compression type | `"ULMO"`  |
+| `expand_filters` | directory scanning filters for expand mode          | `[":*"]`  |
+| `validate`       | run hdiutil verify on new dmgs                      | `true`    |
+| `verbosity`      | affects how much info gets logged during script run | `2`       |
 
-Note that within a JSON file, the keys would need to be enclosed in "".
+Note that within a JSON file, the keys would need to be enclosed in `""`.
 
-If auto_expand is set false, Automator will remake the dmgs instead to try to
+#### auto_expand
+
+If `auto_expand` is set false, Automator will remake the dmgs instead to try to
 clone the files within them (assuming clone_files is true).
-
-The validate option is not strictly necessary, but may provide some peace of
-mind when using it in conjunction with delete_orig, as the the deletion will
-not take place until validation has completed successfully.
-
-The verbosity levels work as follows:
-
-0. stdout is effectively disabled, but stderr is still functional.
-1. Logs a message for each general operation like archiving, expanding, etc.
-2. More steps in terms of making temporary dmgs and such are logged.
-3. Logging goes down to the individual file level for cloning, etc.
 
 #### buf_size
 
@@ -217,6 +209,25 @@ To keep the memory footprint of the script reasonable, this limits how much
 data may be loaded from a file into memory at a time. It defaults to 1 MB.
 Note that up to 2 files may be open simultaneously, making the effective
 memory footprint 2 MB.
+
+#### clone_files
+
+On archiving, this enables the feature in which a temporary read-write dmg is
+created so that files can be cloned within it before the finally read-only dmg
+is produced.
+
+On expanding, this enables the post-expansion cloning pass on the expanded
+directory.
+
+The option is on by default, since that is really the whole point of
+apfs_archive, but you might disable if you have some sort of prior knowledge
+that there is little to clone?
+
+#### delete_orig
+
+On archiving, the source directory is deleted after a dmg is successfully
+created from it. On expanding, the source dmg (or other archive type) is
+deleted after successfully expanding it.
 
 #### dmg_format
 
@@ -236,6 +247,54 @@ application, you would most likely want to use one of these:
 * "ULMO" lzma compression applied (the default)
   * this is the tightest compression available
   * requires macOS 10.15 (Catalina) or later
+
+#### expand_filters
+
+These filters are applied in deciding which archives to expand when they are
+encountered during directory crawl. (Archives specifically listed on the
+command line are filtered.)
+
+Each filter has the following format:
+
+    [FLAGS:]PATTERN
+
+The flags are given as character codes, and you can specify any of these in any
+combination:
+
+| Flag | If Specified            | If Not Specified          |
+| :--- | :---------------------- | :------------------------ |
+| `x`  | is exclude pattern      | is include pattern        |
+| `c`  | case-sensitive matching | case-insensitive matching |
+| `r`  | is regular expression   | is glob pattern           |
+
+Regular expressions are searched across the path string (i.e. you do not need
+a full match).
+
+If you specify more than one filter, each pattern is applied to the archive
+path string in the order given until one of them matches. If none do, the
+fallback is to ask the user whether or not to expand the archive on a
+case-by-case basis.
+
+If you specify filters on the command line with `-c`, these are inserted before
+the default config file filters. If you want the filtering to end with the
+command line ones, you can specify `-c xf::` as your last filter. When the
+`PATTERN` is empty, this indicates the filter list has ended. (See the -c arg
+short-hand info below for how to use the `xf` notation.)
+
+#### validate
+
+The `validate` option is not strictly necessary, but may provide some peace of
+mind when using it in conjunction with delete_orig, as the the deletion will
+not take place until validation has completed successfully.
+
+#### verbosity
+
+The verbosity levels work as follows:
+
+1. stdout is effectively disabled, but stderr is still functional.
+2. Logs a message for each general operation like archiving, expanding, etc.
+3. More steps in terms of making temporary dmgs and such are logged.
+4. Logging goes down to the individual file level for cloning, etc.
 
 #### -c / --config Arg Short-Hand
 
@@ -259,24 +318,25 @@ command line, you could shorten them to:
 
 respectively.
 
-To begin with, you need not supply the double-quotes around the keys. For
-`dmg_format`, the value may also omit the double-quotes and be given in lower
-case.
+To begin with, you need not supply the double-quotes around the keys or values.
 
 Aliases for config keys include:
 
-| Key         | Aliases     |
-| :---------- | :---------- |
-| buf_size    | size        |
-| clone_files | clone       |
-| delete_orig | del, delete |
-| dmg_format  | fmt, format |
-| validate    | val         |
-| verbosity   | v, verb     |
+| Key         | Aliases       |
+| :---------- | :------------ |
+| buf_size    | size          |
+| clone_files | clone         |
+| delete_orig | del, delete   |
+| dmg_format  | fmt, format   |
+| validate    | val           |
+| verbosity   | v, verb       |
+| xf          | expand_filter |
 
 For boolean key values, you can even omit the `:true/false` part. By default,
 it will be considered true, but if you prefix the key with `no` or `no_`, it
 will be set false instead.
+
+##### dmg_format
 
 For the `dmg_format` key, there are also a number of aliases on the value side,
 since it can be rather difficult to remember a code like `UDZO`.
@@ -287,6 +347,34 @@ since it can be rather difficult to remember a code like `UDZO`.
 | UDZO             | gz, gzip, zip, maxcompat   |
 | ULFO             | fast, fastcmp, lzfse       |
 | ULMO             | 7z, 7zip, xz, lzma, maxcmp |
+
+##### Expand Filters
+
+For expand filters, you can, of course, specify a full json `expand_filters`
+list along the lines:
+
+    -c 'expand_filters:["FLAGS:PATTERN",...]'
+
+But there is also a `expand_filter` (singular) key for defining just one
+filter:
+
+    -c 'expand_filter:FLAGS:PATTERN'
+
+This can further be shortened using the `xf` alias to:
+
+    -c 'xf:FLAGS:PATTERN'
+
+So if you decide you want to leave all zip files alone, you could write:
+
+    -c 'xf:x:*.zip'
+
+As mentioned earlier, if you want to be asked about every archive found, you
+can go with:
+
+    -c xf::
+
+The empty pattern disables all filters coming after it, leaving the only option
+of asking the user what to do?
 
 ### Automator Support
 
